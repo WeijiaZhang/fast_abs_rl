@@ -30,15 +30,18 @@ from data.batcher import BucketedGenerater
 
 BUCKET_SIZE = 6400
 
-try:
-    DATA_DIR = os.environ['DATA']
-except KeyError:
-    print('please use environment variable to specify data directories')
+# try:
+#     DATA_DIR = os.environ['DATA']
+# except KeyError:
+#     print('please use environment variable to specify data directories')
+DATA_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/fast_abs_rl/finished_files'
+
 
 class ExtractDataset(CnnDmDataset):
     """ article sentences -> extraction indices
     (dataset created by greedily matching ROUGE)
     """
+
     def __init__(self, split):
         super().__init__(split, DATA_DIR)
 
@@ -51,6 +54,7 @@ class ExtractDataset(CnnDmDataset):
 def build_batchers(net_type, word2id, cuda, debug):
     assert net_type in ['ff', 'rnn']
     prepro = prepro_fn_extract(args.max_word, args.max_sent)
+
     def sort_key(sample):
         src_sents, _ = sample
         return len(src_sents)
@@ -84,11 +88,11 @@ def configure_net(net_type, vocab_size, emb_dim, conv_hidden,
                   lstm_hidden, lstm_layer, bidirectional):
     assert net_type in ['ff', 'rnn']
     net_args = {}
-    net_args['vocab_size']    = vocab_size
-    net_args['emb_dim']       = emb_dim
-    net_args['conv_hidden']   = conv_hidden
-    net_args['lstm_hidden']   = lstm_hidden
-    net_args['lstm_layer']    = lstm_layer
+    net_args['vocab_size'] = vocab_size
+    net_args['emb_dim'] = emb_dim
+    net_args['conv_hidden'] = conv_hidden
+    net_args['lstm_hidden'] = lstm_hidden
+    net_args['lstm_layer'] = lstm_layer
     net_args['bidirectional'] = bidirectional
 
     net = (ExtractSumm(**net_args) if net_type == 'ff'
@@ -104,16 +108,18 @@ def configure_training(net_type, opt, lr, clip_grad, lr_decay, batch_size):
     opt_kwargs['lr'] = lr
 
     train_params = {}
-    train_params['optimizer']      = (opt, opt_kwargs)
+    train_params['optimizer'] = (opt, opt_kwargs)
     train_params['clip_grad_norm'] = clip_grad
-    train_params['batch_size']     = batch_size
-    train_params['lr_decay']       = lr_decay
+    train_params['batch_size'] = batch_size
+    train_params['lr_decay'] = lr_decay
 
     if net_type == 'ff':
-        criterion = lambda logit, target: F.binary_cross_entropy_with_logits(
+        def criterion(logit, target): return F.binary_cross_entropy_with_logits(
             logit, target, reduce=False)
     else:
-        ce = lambda logit, target: F.cross_entropy(logit, target, reduce=False)
+        def ce(logit, target): return F.cross_entropy(
+            logit, target, reduce=False)
+
         def criterion(logits, targets):
             return sequence_loss(logits, targets, ce, pad_idx=-1)
 
@@ -152,8 +158,8 @@ def main(args):
     with open(join(args.path, 'vocab.pkl'), 'wb') as f:
         pkl.dump(word2id, f, pkl.HIGHEST_PROTOCOL)
     meta = {}
-    meta['net']           = 'ml_{}_extractor'.format(args.net_type)
-    meta['net_args']      = net_args
+    meta['net'] = 'ml_{}_extractor'.format(args.net_type)
+    meta['net_args'] = net_args
     meta['traing_params'] = train_params
     with open(join(args.path, 'meta.json'), 'w') as f:
         json.dump(meta, f, indent=4)
@@ -171,8 +177,8 @@ def main(args):
     pipeline = BasicPipeline(meta['net'], net,
                              train_batcher, val_batcher, args.batch, val_fn,
                              criterion, optimizer, grad_fn)
-    trainer = BasicTrainer(pipeline, args.path,
-                           args.ckpt_freq, args.patience, scheduler)
+    trainer = BasicTrainer(pipeline, args.path, args.ckpt_freq, args.patience,
+                           scheduler, report_freq=args.report_freq)
 
     print('start training with the following hyper-parameters:')
     print(meta)
@@ -222,6 +228,10 @@ if __name__ == '__main__':
     parser.add_argument(
         '--ckpt_freq', type=int, action='store', default=3000,
         help='number of update steps for checkpoint and validation'
+    )
+    parser.add_argument(
+        '--report_freq', type=int, action='store', default=100,
+        help='number of steps for reporting train log'
     )
     parser.add_argument('--patience', type=int, action='store', default=5,
                         help='patience for early stopping')

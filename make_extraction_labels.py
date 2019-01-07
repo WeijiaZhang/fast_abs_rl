@@ -12,10 +12,11 @@ from utils import count_data
 from metric import compute_rouge_l
 
 
-try:
-    DATA_DIR = os.environ['DATA']
-except KeyError:
-    print('please use environment variable to specify data directories')
+# try:
+#     DATA_DIR = os.environ['DATA']
+# except KeyError:
+#     print('please use environment variable to specify data directories')
+DATA_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/fast_abs_rl/finished_files'
 
 
 def _split_words(texts):
@@ -38,6 +39,7 @@ def get_extract_label(art_sents, abs_sents):
             break
     return extracted, scores
 
+
 @curry
 def process(split, i):
     data_dir = join(DATA_DIR, split)
@@ -46,7 +48,7 @@ def process(split, i):
     tokenize = compose(list, _split_words)
     art_sents = tokenize(data['article'])
     abs_sents = tokenize(data['abstract'])
-    if art_sents and abs_sents: # some data contains empty article/abstract
+    if art_sents and abs_sents:  # some data contains empty article/abstract
         extracted, scores = get_extract_label(art_sents, abs_sents)
     else:
         extracted, scores = [], []
@@ -54,6 +56,7 @@ def process(split, i):
     data['score'] = scores
     with open(join(data_dir, '{}.json'.format(i)), 'w') as f:
         json.dump(data, f, indent=4)
+
 
 def label_mp(split):
     """ process the data split with multi-processing"""
@@ -64,7 +67,8 @@ def label_mp(split):
     with mp.Pool() as pool:
         list(pool.imap_unordered(process(split),
                                  list(range(n_data)), chunksize=1024))
-    print('finished in {}'.format(timedelta(seconds=time()-start)))
+    print('finished in {}'.format(timedelta(seconds=time() - start)))
+
 
 def label(split):
     start = time()
@@ -72,7 +76,7 @@ def label(split):
     data_dir = join(DATA_DIR, split)
     n_data = count_data(data_dir)
     for i in range(n_data):
-        print('processing {}/{} ({:.2f}%%)\r'.format(i, n_data, 100*i/n_data),
+        print('processing {}/{} ({:.2f}%%)\r'.format(i, n_data, 100 * i / n_data),
               end='')
         with open(join(data_dir, '{}.json'.format(i))) as f:
             data = json.loads(f.read())
@@ -84,12 +88,13 @@ def label(split):
         data['score'] = scores
         with open(join(data_dir, '{}.json'.format(i)), 'w') as f:
             json.dump(data, f, indent=4)
-    print('finished in {}'.format(timedelta(seconds=time()-start)))
+    print('finished in {}'.format(timedelta(seconds=time() - start)))
 
 
 def main():
     for split in ['val', 'train']:  # no need of extraction label when testing
         label_mp(split)
+
 
 if __name__ == '__main__':
     main()

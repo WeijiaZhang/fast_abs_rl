@@ -30,14 +30,16 @@ from metric import compute_rouge_l, compute_rouge_n
 
 MAX_ABS_LEN = 30
 
-try:
-    DATA_DIR = os.environ['DATA']
-except KeyError:
-    print('please use environment variable to specify data directories')
+# try:
+#     DATA_DIR = os.environ['DATA']
+# except KeyError:
+#     print('please use environment variable to specify data directories')
+DATA_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/fast_abs_rl/finished_files'
 
 
 class RLDataset(CnnDmDataset):
     """ get the article sentences only (for decoding use)"""
+
     def __init__(self, split):
         super().__init__(split, DATA_DIR)
 
@@ -46,6 +48,7 @@ class RLDataset(CnnDmDataset):
         art_sents = js_data['article']
         abs_sents = js_data['abstract']
         return art_sents, abs_sents
+
 
 def load_ext_net(ext_dir):
     ext_meta = json.load(open(join(ext_dir, 'meta.json')))
@@ -90,16 +93,17 @@ def configure_training(opt, lr, clip_grad, lr_decay, batch_size,
     opt_kwargs['lr'] = lr
 
     train_params = {}
-    train_params['optimizer']      = (opt, opt_kwargs)
+    train_params['optimizer'] = (opt, opt_kwargs)
     train_params['clip_grad_norm'] = clip_grad
-    train_params['batch_size']     = batch_size
-    train_params['lr_decay']       = lr_decay
-    train_params['gamma']          = gamma
-    train_params['reward']         = reward
-    train_params['stop_coeff']     = stop_coeff
-    train_params['stop_reward']    = stop_reward
+    train_params['batch_size'] = batch_size
+    train_params['lr_decay'] = lr_decay
+    train_params['gamma'] = gamma
+    train_params['reward'] = reward
+    train_params['stop_coeff'] = stop_coeff
+    train_params['stop_reward'] = stop_reward
 
     return train_params
+
 
 def build_batchers(batch_size):
     def coll(batch):
@@ -145,7 +149,8 @@ def train(args):
         abs_ckpt['state_dict'] = load_best_ckpt(args.abs_dir)
         abs_vocab = pkl.load(open(join(args.abs_dir, 'vocab.pkl'), 'rb'))
         abs_dir = join(args.path, 'abstractor')
-        os.makedirs(join(abs_dir, 'ckpt'))
+        if not exists(join(abs_dir, 'ckpt')):
+            os.makedirs(join(abs_dir, 'ckpt'))
         with open(join(abs_dir, 'meta.json'), 'w') as f:
             json.dump(net_args['abstractor'], f, indent=4)
         torch.save(abs_ckpt, join(abs_dir, 'ckpt/ckpt-0-0'))
@@ -153,9 +158,9 @@ def train(args):
             pkl.dump(abs_vocab, f)
     # save configuration
     meta = {}
-    meta['net']           = 'rnn-ext_abs_rl'
-    meta['net_args']      = net_args
-    meta['train_params']  = train_params
+    meta['net'] = 'rnn-ext_abs_rl'
+    meta['net_args'] = net_args
+    meta['train_params'] = train_params
     with open(join(args.path, 'meta.json'), 'w') as f:
         json.dump(meta, f, indent=4)
     with open(join(args.path, 'agent_vocab.pkl'), 'wb') as f:
@@ -175,7 +180,7 @@ def train(args):
                            stop_reward_fn, args.stop)
     trainer = BasicTrainer(pipeline, args.path,
                            args.ckpt_freq, args.patience, scheduler,
-                           val_mode='score')
+                           val_mode='score', report_freq=args.report_freq)
 
     print('start training with the following hyper-parameters:')
     print(meta)
@@ -187,7 +192,6 @@ if __name__ == '__main__':
         description='program to demo a Seq2Seq model'
     )
     parser.add_argument('--path', required=True, help='root of the model')
-
 
     # model options
     parser.add_argument('--abs_dir', action='store',
@@ -217,6 +221,10 @@ if __name__ == '__main__':
     parser.add_argument(
         '--ckpt_freq', type=int, action='store', default=1000,
         help='number of update steps for checkpoint and validation'
+    )
+    parser.add_argument(
+        '--report_freq', type=int, action='store', default=100,
+        help='number of steps for reporting train log'
     )
     parser.add_argument('--patience', type=int, action='store', default=3,
                         help='patience for early stopping')

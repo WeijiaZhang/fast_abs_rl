@@ -18,13 +18,16 @@ from data.batcher import conver2id, pad_batch_tensorize
 from data.data import CnnDmDataset
 
 
-try:
-    DATASET_DIR = os.environ['DATA']
-except KeyError:
-    print('please use environment variable to specify data directories')
+# try:
+#     DATASET_DIR = os.environ['DATA']
+# except KeyError:
+#     print('please use environment variable to specify data directories')
+DATASET_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/fast_abs_rl/finished_files'
+
 
 class DecodeDataset(CnnDmDataset):
     """ get the article sentences only (for decoding use)"""
+
     def __init__(self, split):
         assert split in ['val', 'test']
         super().__init__(split, DATASET_DIR)
@@ -79,10 +82,10 @@ class Abstractor(object):
         articles = conver2id(UNK, self._word2id, raw_article_sents)
         art_lens = [len(art) for art in articles]
         article = pad_batch_tensorize(articles, PAD, cuda=False
-                                     ).to(self._device)
+                                      ).to(self._device)
         extend_arts = conver2id(UNK, ext_word2id, raw_article_sents)
         extend_art = pad_batch_tensorize(extend_arts, PAD, cuda=False
-                                        ).to(self._device)
+                                         ).to(self._device)
         extend_vsize = len(ext_word2id)
         dec_args = (article, art_lens, extend_art, extend_vsize,
                     START, END, UNK, self._max_len)
@@ -92,6 +95,7 @@ class Abstractor(object):
         self._net.eval()
         dec_args, id2word = self._prepro(raw_article_sents)
         decs, attns = self._net.batch_decode(*dec_args)
+
         def argmax(arr, keys):
             return arr[max(range(len(arr)), key=lambda i: keys[i].item())]
         dec_sents = []
@@ -117,6 +121,7 @@ class BeamAbstractor(Abstractor):
         all_beams = list(starmap(_process_beam(id2word),
                                  zip(all_beams, raw_article_sents)))
         return all_beams
+
 
 @curry
 def _process_beam(id2word, beam, art_sent):
@@ -161,7 +166,7 @@ class Extractor(object):
         n_art = len(raw_article_sents)
         articles = conver2id(UNK, self._word2id, raw_article_sents)
         article = pad_batch_tensorize(articles, PAD, cuda=False
-                                     ).to(self._device)
+                                      ).to(self._device)
         indices = self._net.extract([article], k=min(n_art, self._max_ext))
         return indices
 
@@ -175,8 +180,9 @@ class ArticleBatcher(object):
     def __call__(self, raw_article_sents):
         articles = conver2id(UNK, self._word2id, raw_article_sents)
         article = pad_batch_tensorize(articles, PAD, cuda=False
-                                     ).to(self._device)
+                                      ).to(self._device)
         return article
+
 
 class RLExtractor(object):
     def __init__(self, ext_dir, cuda=True):

@@ -11,8 +11,10 @@ INI = 1e-2
 
 # FIXME eccessing 'private members' of pointer net module is bad
 
+
 class PtrExtractorRL(nn.Module):
     """ works only on single sample in RL setting"""
+
     def __init__(self, ptr_net):
         super().__init__()
         assert isinstance(ptr_net, LSTMPointerNet)
@@ -44,7 +46,7 @@ class PtrExtractorRL(nn.Module):
             query = h[:, -1, :]
             for _ in range(self._n_hop):
                 query = PtrExtractorRL.attention(hop_feat, query,
-                                                self._hop_v, self._hop_wq)
+                                                 self._hop_v, self._hop_wq)
             score = PtrExtractorRL.attention_score(
                 attn_feat, query, self._attn_v, self._attn_wq)
             if self.training:
@@ -63,7 +65,7 @@ class PtrExtractorRL(nn.Module):
     def attention_score(attention, query, v, w):
         """ unnormalized attention score"""
         sum_ = attention + torch.mm(query, w)
-        score = torch.mm(F.tanh(sum_), v.unsqueeze(1)).t()
+        score = torch.mm(torch.tanh(sum_), v.unsqueeze(1)).t()
         return score
 
     @staticmethod
@@ -104,7 +106,7 @@ class PtrExtractorRLStop(PtrExtractorRL):
             query = h[:, -1, :]
             for _ in range(self._n_hop):
                 query = PtrExtractorRL.attention(hop_feat, query,
-                                                self._hop_v, self._hop_wq)
+                                                 self._hop_v, self._hop_wq)
             score = PtrExtractorRL.attention_score(
                 attn_feat, query, self._attn_v, self._attn_wq)
             for o in outputs:
@@ -130,6 +132,7 @@ class PtrExtractorRLStop(PtrExtractorRL):
 
 class PtrScorer(nn.Module):
     """ to be used as critic (predicts a scalar baseline reward)"""
+
     def __init__(self, ptr_net):
         super().__init__()
         assert isinstance(ptr_net, LSTMPointerNet)
@@ -176,13 +179,15 @@ class PtrScorer(nn.Module):
     def attention(attention, attention_feat, query, v, w):
         """ attention context vector"""
         sum_ = attention_feat + torch.mm(query, w)
-        score = F.softmax(torch.mm(F.tanh(sum_), v.unsqueeze(1)).t(), dim=-1)
+        score = F.softmax(
+            torch.mm(torch.tanh(sum_), v.unsqueeze(1)).t(), dim=-1)
         output = torch.mm(score, attention)
         return output
 
 
 class ActorCritic(nn.Module):
     """ shared encoder between actor/critic"""
+
     def __init__(self, sent_encoder, art_encoder,
                  extractor, art_batcher):
         super().__init__()

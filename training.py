@@ -1,6 +1,6 @@
 """ module providing basic training utilities"""
 import os
-from os.path import join
+from os.path import join, exists
 from time import time
 from datetime import timedelta
 from itertools import starmap
@@ -17,7 +17,9 @@ def get_basic_grad_fn(net, clip_grad, max_grad=1e2):
     def f():
         grad_norm = clip_grad_norm_(
             [p for p in net.parameters() if p.requires_grad], clip_grad)
-        grad_norm = grad_norm.item()
+        # import pdb
+        # pdb.set_trace()
+        # grad_norm = grad_norm.item()
         if max_grad is not None and grad_norm >= max_grad:
             print('WARNING: Exploding Gradients {:.2f}'.format(grad_norm))
             grad_norm = max_grad
@@ -26,15 +28,18 @@ def get_basic_grad_fn(net, clip_grad, max_grad=1e2):
         return grad_log
     return f
 
+
 @curry
 def compute_loss(net, criterion, fw_args, loss_args):
     loss = criterion(*((net(*fw_args),) + loss_args))
     return loss
 
+
 @curry
 def val_step(loss_step, fw_args, loss_args):
     loss = loss_step(fw_args, loss_args)
     return loss.size(0), loss.sum().item()
+
 
 @curry
 def basic_validate(net, criterion, val_batches):
@@ -44,14 +49,14 @@ def basic_validate(net, criterion, val_batches):
     with torch.no_grad():
         validate_fn = val_step(compute_loss(net, criterion))
         n_data, tot_loss = reduce(
-            lambda a, b: (a[0]+b[0], a[1]+b[1]),
+            lambda a, b: (a[0] + b[0], a[1] + b[1]),
             starmap(validate_fn, val_batches),
             (0, 0)
         )
     val_loss = tot_loss / n_data
     print(
         'validation finished in {}                                    '.format(
-            timedelta(seconds=int(time()-start)))
+            timedelta(seconds=int(time() - start)))
     )
     print('validation loss: {:.4f} ... '.format(val_loss))
     return {'loss': val_loss}
@@ -132,16 +137,19 @@ class BasicPipeline(object):
 
 class BasicTrainer(object):
     """ Basic trainer with minimal function and early stopping"""
+
     def __init__(self, pipeline, save_dir, ckpt_freq, patience,
-                 scheduler=None, val_mode='loss'):
+                 scheduler=None, val_mode='loss', report_freq=100):
         assert isinstance(pipeline, BasicPipeline)
         assert val_mode in ['loss', 'score']
         self._pipeline = pipeline
         self._save_dir = save_dir
         self._logger = tensorboardX.SummaryWriter(join(save_dir, 'log'))
-        os.makedirs(join(save_dir, 'ckpt'))
+        if not exists(join(save_dir, 'ckpt')):
+            os.makedirs(join(save_dir, 'ckpt'))
 
         self._ckpt_freq = ckpt_freq
+        self._report_freq = report_freq
         self._patience = patience
         self._sched = scheduler
         self._val_mode = val_mode
@@ -155,7 +163,7 @@ class BasicTrainer(object):
     def log(self, log_dict):
         loss = log_dict['loss'] if 'loss' in log_dict else log_dict['reward']
         if self._running_loss is not None:
-            self._running_loss = 0.99*self._running_loss + 0.01*loss
+            self._running_loss = 0.99 * self._running_loss + 0.01 * loss
         else:
             self._running_loss = loss
         print('train step: {}, {}: {:.4f}\r'.format(
@@ -210,12 +218,13 @@ class BasicTrainer(object):
             while True:
                 log_dict = self._pipeline.train_step()
                 self._step += 1
-                self.log(log_dict)
+                if self._step % self._report_freq == 0:
+                    self.log(log_dict)
 
                 if self._step % self._ckpt_freq == 0:
                     stop = self.checkpoint()
                     if stop:
                         break
-            print('Training finised in ', timedelta(seconds=time()-start))
+            print('Training finised in ', timedelta(seconds=time() - start))
         finally:
             self._pipeline.terminate()

@@ -55,7 +55,11 @@ def decode(save_path, model_dir, split, batch_size,
     )
 
     # prepare save paths and logs
-    os.makedirs(join(save_path, 'output'))
+    if not os.path.isdir(save_path):
+        os.makedirs(save_path)
+    dec_path = join(save_path, split)
+    if not os.path.isdir(dec_path):
+        os.makedirs(dec_path)
     dec_log = {}
     dec_log['abstractor'] = meta['net_args']['abstractor']
     dec_log['extractor'] = meta['net_args']['extractor']
@@ -88,33 +92,37 @@ def decode(save_path, model_dir, split, batch_size,
                 dec_outs = rerank_mp(all_beams, ext_inds)
             else:
                 dec_outs = abstractor(ext_arts)
-            assert i == batch_size*i_debug
+            assert i == batch_size * i_debug
             for j, n in ext_inds:
-                decoded_sents = [' '.join(dec) for dec in dec_outs[j:j+n]]
-                with open(join(save_path, 'output/{}.dec'.format(i)),
+                decoded_sents = [' '.join(dec) for dec in dec_outs[j:j + n]]
+                with open(join(save_path, split, '{}.dec'.format(i)),
                           'w') as f:
                     f.write(make_html_safe('\n'.join(decoded_sents)))
                 i += 1
                 print('{}/{} ({:.2f}%) decoded in {} seconds\r'.format(
-                    i, n_data, i/n_data*100,
-                    timedelta(seconds=int(time()-start))
+                    i, n_data, i / n_data * 100,
+                    timedelta(seconds=int(time() - start))
                 ), end='')
     print()
 
+
 _PRUNE = defaultdict(
     lambda: 2,
-    {1:5, 2:5, 3:5, 4:5, 5:5, 6:4, 7:3, 8:3}
+    {1: 5, 2: 5, 3: 5, 4: 5, 5: 5, 6: 4, 7: 3, 8: 3}
 )
 
+
 def rerank(all_beams, ext_inds):
-    beam_lists = (all_beams[i: i+n] for i, n in ext_inds if n > 0)
+    beam_lists = (all_beams[i: i + n] for i, n in ext_inds if n > 0)
     return list(concat(map(rerank_one, beam_lists)))
 
+
 def rerank_mp(all_beams, ext_inds):
-    beam_lists = [all_beams[i: i+n] for i, n in ext_inds if n > 0]
+    beam_lists = [all_beams[i: i + n] for i, n in ext_inds if n > 0]
     with mp.Pool(8) as pool:
         reranked = pool.map(rerank_one, beam_lists)
     return list(concat(reranked))
+
 
 def rerank_one(beams):
     @curry
@@ -127,12 +135,14 @@ def rerank_one(beams):
     dec_outs = [h.sequence for h in best_hyps]
     return dec_outs
 
+
 def _make_n_gram(sequence, n=2):
-    return (tuple(sequence[i:i+n]) for i in range(len(sequence)-(n-1)))
+    return (tuple(sequence[i:i + n]) for i in range(len(sequence) - (n - 1)))
+
 
 def _compute_score(hyps):
     all_cnt = reduce(op.iadd, (h.gram_cnt for h in hyps), Counter())
-    repeat = sum(c-1 for g, c in all_cnt.items() if c > 1)
+    repeat = sum(c - 1 for g, c in all_cnt.items() if c > 1)
     lp = sum(h.logprob for h in hyps) / sum(len(h.sequence) for h in hyps)
     return (-repeat, lp)
 

@@ -30,15 +30,18 @@ from utils import make_vocab, make_embedding
 #       to low may increase # of PAD tokens
 BUCKET_SIZE = 6400
 
-try:
-    DATA_DIR = os.environ['DATA']
-except KeyError:
-    print('please use environment variable to specify data directories')
+# try:
+#     DATA_DIR = os.environ['DATA']
+# except KeyError:
+#     print('please use environment variable to specify data directories')
+DATA_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/fast_abs_rl/finished_files'
+
 
 class MatchDataset(CnnDmDataset):
     """ single article sentence -> single abstract sentence
     (dataset created by greedily matching ROUGE)
     """
+
     def __init__(self, split):
         super().__init__(split, DATA_DIR)
 
@@ -53,11 +56,11 @@ class MatchDataset(CnnDmDataset):
 def configure_net(vocab_size, emb_dim,
                   n_hidden, bidirectional, n_layer):
     net_args = {}
-    net_args['vocab_size']    = vocab_size
-    net_args['emb_dim']       = emb_dim
-    net_args['n_hidden']      = n_hidden
+    net_args['vocab_size'] = vocab_size
+    net_args['emb_dim'] = emb_dim
+    net_args['n_hidden'] = n_hidden
     net_args['bidirectional'] = bidirectional
-    net_args['n_layer']       = n_layer
+    net_args['n_layer'] = n_layer
 
     net = CopySumm(**net_args)
     return net, net_args
@@ -70,19 +73,22 @@ def configure_training(opt, lr, clip_grad, lr_decay, batch_size):
     opt_kwargs['lr'] = lr
 
     train_params = {}
-    train_params['optimizer']      = (opt, opt_kwargs)
+    train_params['optimizer'] = (opt, opt_kwargs)
     train_params['clip_grad_norm'] = clip_grad
-    train_params['batch_size']     = batch_size
-    train_params['lr_decay']       = lr_decay
+    train_params['batch_size'] = batch_size
+    train_params['lr_decay'] = lr_decay
 
-    nll = lambda logit, target: F.nll_loss(logit, target, reduce=False)
+    def nll(logit, target): return F.nll_loss(logit, target, reduce=False)
+
     def criterion(logits, targets):
         return sequence_loss(logits, targets, nll, pad_idx=PAD)
 
     return criterion, train_params
 
+
 def build_batchers(word2id, cuda, debug):
     prepro = prepro_fn(args.max_art, args.max_abs)
+
     def sort_key(sample):
         src, target = sample
         return (len(target), len(src))
@@ -108,6 +114,7 @@ def build_batchers(word2id, cuda, debug):
     val_batcher = BucketedGenerater(val_loader, prepro, sort_key, batchify,
                                     single_run=True, fork=not debug)
     return train_batcher, val_batcher
+
 
 def main(args):
     # create data batcher, vocabulary
@@ -139,8 +146,8 @@ def main(args):
     with open(join(args.path, 'vocab.pkl'), 'wb') as f:
         pkl.dump(word2id, f, pkl.HIGHEST_PROTOCOL)
     meta = {}
-    meta['net']           = 'base_abstractor'
-    meta['net_args']      = net_args
+    meta['net'] = 'base_abstractor'
+    meta['net_args'] = net_args
     meta['traing_params'] = train_params
     with open(join(args.path, 'meta.json'), 'w') as f:
         json.dump(meta, f, indent=4)
@@ -158,8 +165,8 @@ def main(args):
     pipeline = BasicPipeline(meta['net'], net,
                              train_batcher, val_batcher, args.batch, val_fn,
                              criterion, optimizer, grad_fn)
-    trainer = BasicTrainer(pipeline, args.path,
-                           args.ckpt_freq, args.patience, scheduler)
+    trainer = BasicTrainer(pipeline, args.path, args.ckpt_freq, args.patience,
+                           scheduler, report_freq=args.report_freq)
 
     print('start training with the following hyper-parameters:')
     print(meta)
@@ -171,7 +178,6 @@ if __name__ == '__main__':
         description='training of the abstractor (ML)'
     )
     parser.add_argument('--path', required=True, help='root of the model')
-
 
     parser.add_argument('--vsize', type=int, action='store', default=30000,
                         help='vocabulary size')
@@ -205,6 +211,10 @@ if __name__ == '__main__':
     parser.add_argument(
         '--ckpt_freq', type=int, action='store', default=3000,
         help='number of update steps for checkpoint and validation'
+    )
+    parser.add_argument(
+        '--report_freq', type=int, action='store', default=100,
+        help='number of steps for reporting train log'
     )
     parser.add_argument('--patience', type=int, action='store', default=5,
                         help='patience for early stopping')

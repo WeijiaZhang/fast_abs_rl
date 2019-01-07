@@ -13,13 +13,16 @@ import gensim
 from utils import count_data
 
 
-try:
-    DATA_DIR = os.environ['DATA']
-except KeyError:
-    print('please use environment variable to specify data directories')
+# try:
+#     DATA_DIR = os.environ['DATA']
+# except KeyError:
+#     print('please use environment variable to specify data directories')
+DATA_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/fast_abs_rl/finished_files'
+
 
 class Sentences(object):
     """ needed for gensim word2vec training"""
+
     def __init__(self):
         self._path = join(DATA_DIR, 'train')
         self._n_data = count_data(self._path)
@@ -44,18 +47,18 @@ def main(args):
     model = gensim.models.Word2Vec(
         size=args.dim, min_count=5, workers=16, sg=1)
     model.build_vocab(sentences)
-    print('vocab built in {}'.format(timedelta(seconds=time()-start)))
+    print('vocab built in {}'.format(timedelta(seconds=time() - start)))
     model.train(sentences,
                 total_examples=model.corpus_count, epochs=model.iter)
 
     model.save(join(save_dir, 'word2vec.{}d.{}k.bin'.format(
-        args.dim, len(model.wv.vocab)//1000)))
+        args.dim, len(model.wv.vocab) // 1000)))
     model.wv.save_word2vec_format(join(
         save_dir,
-        'word2vec.{}d.{}k.w2v'.format(args.dim, len(model.wv.vocab)//1000)
+        'word2vec.{}d.{}k.w2v'.format(args.dim, len(model.wv.vocab) // 1000)
     ))
 
-    print('word2vec trained in {}'.format(timedelta(seconds=time()-start)))
+    print('word2vec trained in {}'.format(timedelta(seconds=time() - start)))
 
 
 if __name__ == '__main__':

@@ -5,12 +5,13 @@ from os.path import join, abspath, dirname, exists
 from evaluate import eval_meteor, eval_rouge
 
 
-_REF_DIR = join(abspath(dirname(__file__)), 'acl18_results')
+# _REF_DIR = join(abspath(dirname(__file__)), 'acl18_results')
 
 
 def main(args):
     dec_dir = args.decode_dir
-    ref_dir = join(_REF_DIR, 'reference')
+    # ref_dir = join(_REF_DIR, 'reference')
+    ref_dir = args.refer_dir
     if args.rouge:
         dec_pattern = r'(\d+).dec'
         ref_pattern = '#ID#.ref'
@@ -23,7 +24,7 @@ def main(args):
 
 
 if __name__ == '__main__':
-    assert exists(_REF_DIR)
+    # assert exists(_REF_DIR)
     parser = argparse.ArgumentParser(
         description='Evaluate the output files to get the numbers reported'
                     ' as in the ACL paper'
@@ -38,6 +39,8 @@ if __name__ == '__main__':
 
     parser.add_argument('--decode_dir', action='store', required=True,
                         help='directory of decoded summaries')
+    parser.add_argument('--refer_dir', action='store', required=True,
+                        help='directory of references')
 
     args = parser.parse_args()
     main(args)
