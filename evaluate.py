@@ -4,10 +4,11 @@ import os
 from os.path import join
 import logging
 import tempfile
+import shutil
 import subprocess as sp
 
 from cytoolz import curry
-
+import pyrouge
 from pyrouge import Rouge155
 from pyrouge.utils import log
 
@@ -17,6 +18,68 @@ try:
 except KeyError:
     print('Warning: ROUGE is not configured')
     _ROUGE_PATH = None
+
+
+def write_sentences(summaries, references, system_dir, model_dir):
+    for i, (summary, candidate) in enumerate(zip(summaries, references)):
+        # if i > 100:
+        #     break
+        summary_file = '%i.txt' % i
+        candidate_file = '%i.txt' % i
+        with open(os.path.join(model_dir, candidate_file), 'w', encoding="utf-8") as f:
+            f.write('\n'.join(candidate))
+
+        with open(os.path.join(system_dir, summary_file), 'w', encoding="utf-8") as f:
+            f.write('\n'.join(summary))
+
+
+def eval_rouge_cmd_helper(dec_pattern, dec_dir, ref_pattern, ref_dir,
+                          cmd='-c 95 -r 1000 -n 2 -m', system_id=1):
+    """ evaluate by original Perl implementation"""
+    # silence pyrouge logging
+    log.get_global_console_logger().setLevel(logging.WARNING)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        Rouge155.convert_summaries_to_rouge_format(
+            dec_dir, os.path.join(tmp_dir, 'dec'))
+        Rouge155.convert_summaries_to_rouge_format(
+            ref_dir, os.path.join(tmp_dir, 'ref'))
+        Rouge155.write_config_static(
+            os.path.join(tmp_dir, 'dec'), dec_pattern,
+            os.path.join(tmp_dir, 'ref'), ref_pattern,
+            os.path.join(tmp_dir, 'settings.xml'), system_id
+        )
+        cmd = (os.path.join(_ROUGE_PATH, 'ROUGE-1.5.5.pl')
+               + ' -e {} '.format(os.path.join(_ROUGE_PATH, 'data'))
+               + cmd
+               + ' -a {}'.format(os.path.join(tmp_dir, 'settings.xml')))
+        output = sp.check_output(cmd.split(' '), universal_newlines=True)
+    return output
+
+
+def eval_rouge_by_cmd(summaries, references, split='test'):
+    tmp_dir = "./rouge_tmp_%s" % split
+    system_filename_pattern = '(\d+).txt'
+    model_filename_pattern = '#ID#.txt'
+    system_dir = os.path.join(tmp_dir, 'system')
+    model_dir = os.path.join(tmp_dir, 'model')
+    try:
+        if not os.path.isdir(tmp_dir):
+            os.mkdir(tmp_dir)
+            os.mkdir(system_dir)
+            os.mkdir(model_dir)
+        assert len(summaries) == len(references)
+        write_sentences(summaries, references, system_dir, model_dir)
+
+        output = eval_rouge_cmd_helper(system_filename_pattern, system_dir,
+                                       model_filename_pattern, model_dir)
+
+        r = Rouge155()
+        res_dict = r.output_to_dict(output)
+        return res_dict
+    finally:
+        # pass
+        if os.path.isdir(tmp_dir):
+            shutil.rmtree(tmp_dir)
 
 
 def eval_rouge(dec_pattern, dec_dir, ref_pattern, ref_dir,

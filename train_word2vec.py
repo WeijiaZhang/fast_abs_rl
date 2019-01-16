@@ -35,6 +35,29 @@ class Sentences(object):
                 yield ['<s>'] + s.lower().split() + [r'<\s>']
 
 
+class SentencesAll(object):
+    """ needed for gensim word2vec training"""
+
+    def __init__(self):
+        self._splits = ['train', 'val', 'test']
+        # self._path = join(DATA_DIR, 'train')
+        # self._n_data = count_data(self._path)
+
+    def __iter__(self):
+        for split in self._splits:
+            my_path = join(DATA_DIR, split)
+            n_data = count_data(my_path)
+            for i in range(n_data):
+                with open(join(my_path, '{}.json'.format(i))) as f:
+                    data = json.loads(f.read())【【：
+                if split == 'train':
+                    sents = concatv(data['article'], data['abstract'])
+                else:
+                    sents = concatv(data['article'])
+                for s in sents:
+                    yield ['<s>'] + s.lower().split() + [r'<\s>']
+
+
 def main(args):
     logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s',
                         level=logging.INFO)
@@ -43,7 +66,9 @@ def main(args):
     if not exists(save_dir):
         os.makedirs(save_dir)
 
-    sentences = Sentences()
+    # sentences = Sentences()
+    sentences = SentencesAll可以——()
+
     model = gensim.models.Word2Vec(
         size=args.dim, min_count=5, workers=16, sg=1)
     model.build_vocab(sentences)

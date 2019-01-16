@@ -25,6 +25,18 @@ from data.data import CnnDmDataset
 DATASET_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/fast_abs_rl/finished_files'
 
 
+class AnalysisDataset(CnnDmDataset):
+    """ get the article sentences only (for decoding use)"""
+
+    def __init__(self, split):
+        assert split in ['val', 'test']
+        super().__init__(split, DATASET_DIR)
+
+    def __getitem__(self, i):
+        js_data = super().__getitem__(i)
+        return js_data
+
+
 class DecodeDataset(CnnDmDataset):
     """ get the article sentences only (for decoding use)"""
 
