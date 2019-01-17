@@ -1,7 +1,7 @@
 """ evaluation scripts"""
 import re
 import os
-from os.path import join
+from os.path import join, exists
 import logging
 import tempfile
 import shutil
@@ -56,14 +56,15 @@ def eval_rouge_cmd_helper(dec_pattern, dec_dir, ref_pattern, ref_dir,
     return output
 
 
-def eval_rouge_by_cmd(summaries, references, split='test'):
-    tmp_dir = "./rouge_tmp_%s" % split
+def eval_rouge_by_cmd(summaries, references, split='test', threshold='0.5', is_print_avg=False):
+    tmp_root_path = './rouge_tmp'
+    tmp_dir = join(tmp_root_path, "%s_%s" % (split, threshold))
     system_filename_pattern = '(\d+).txt'
     model_filename_pattern = '#ID#.txt'
     system_dir = os.path.join(tmp_dir, 'system')
     model_dir = os.path.join(tmp_dir, 'model')
     try:
-        if not os.path.isdir(tmp_dir):
+        if not exists(tmp_dir):
             os.mkdir(tmp_dir)
             os.mkdir(system_dir)
             os.mkdir(model_dir)
@@ -72,7 +73,8 @@ def eval_rouge_by_cmd(summaries, references, split='test'):
 
         output = eval_rouge_cmd_helper(system_filename_pattern, system_dir,
                                        model_filename_pattern, model_dir)
-
+        if is_print_avg:
+            print(output)
         r = Rouge155()
         res_dict = r.output_to_dict(output)
         return res_dict

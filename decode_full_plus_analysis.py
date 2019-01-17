@@ -23,8 +23,9 @@ from decoding import make_html_safe
 from evaluate import eval_rouge_by_cmd
 
 
-def format_rouge(summaries, references, split='test'):
-    results_dict = eval_rouge_by_cmd(summaries, references, split=split)
+def format_rouge(summaries, references, split='test', threshold='0.5'):
+    results_dict = eval_rouge_by_cmd(
+        summaries, references, split=split, threshold=threshold)
     res = []
     for idx in ['1', '2', 'l']:
         head_prefix = "ROUGE-%s" % idx.upper()
