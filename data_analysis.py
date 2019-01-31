@@ -11,8 +11,9 @@ from tqdm import tqdm
 from decoding import make_html_safe
 import fire
 from collections import defaultdict
+import numpy as np
 
-from cytoolz import curry, compose
+from cytoolz import curry, compose, concat
 from make_extraction_labels import _split_words
 from metric import compute_rouge_l
 from evaluate import eval_rouge_by_cmd
@@ -35,9 +36,9 @@ def count_data_by_suffix(path, suffix='json'):
     return n_data
 
 
-def read_json(fin, key='decode'):
+def read_json(fin, key='decode', k=3):
     js_data = json.loads(fin.read())
-    abs_sents = js_data[key]
+    abs_sents = js_data[key][:k]
     return abs_sents
 
 
@@ -111,6 +112,43 @@ def get_co_sent():
                               (query, len(co_idx), idx_str))
 
     output_file.close()
+
+
+def count_article_stats(args):
+    input_path = join(args.in_path, args.split)
+    suffix = args.suffix
+
+    n_data = count_data_by_suffix(input_path, suffix=suffix)
+    len_art = []
+    len_abs = []
+
+    len_sent_art = []
+    len_sent_abs = []
+    for i in tqdm(range(n_data)):
+        with open(join(input_path, '{}.{}'.format(i, suffix))) as f:
+            data = json.loads(f.read())
+            art_sents = data['article']
+            abs_sents = data['abstract']
+            len_art.append(len(art_sents))
+            len_abs.append(len(abs_sents))
+            for ele in art_sents:
+                len_sent_art.append(len(ele.split()))
+            for ele in abs_sents:
+                len_sent_abs.append(len(ele.split()))
+
+    def print_data(data, name):
+        print("%s: " % name)
+        print("Total: %d, Min: %.2f, Max: %.2f, Mean: %.2f, Std: %.2f" %
+              (len(data), np.min(data), np.max(data), np.mean(data), np.std(data)))
+        percent = np.percentile(data, [50, 60, 70, 80, 90])
+        print("Percentile: 50%%: %.2f, 60%%: %.2f, 70%%: %.2f, 80%%: %.2f, 90%%: %.2f\n" %
+              tuple(percent))
+    print_data(len_art, name='Length of article (Number of sentences)')
+    print_data(len_abs, name='Length of abstract (Number of sentences)')
+    print_data(
+        len_sent_art, name='Length of sentences in article (Number of words)')
+    print_data(
+        len_sent_abs, name='Length of sentences in abstract (Number of words)')
 
 
 def count_article_sent(args):
@@ -199,7 +237,9 @@ def count_scores(args):
     num_sum = 1
     for key, score_count in score_count_dict.items():
         for i in range(len(thresholds) + 1):
-            num_count = sum(map(lambda x: x[i], score_count))
+            data = list(map(lambda x: x[i], score_count))
+            data = list(filter(lambda x: x > 0.1, data))
+            num_count = sum(data)
             if i == 0:
                 print("Total number of %s: %d (avg sent: %.2f)" %
                       (key, num_count, 1.0 * num_count / (len(score_count) + 1e-3)))
@@ -213,8 +253,13 @@ def count_scores(args):
                         map(lambda x: x[i], score_count_dict['rouge_l_r_max']))
                     rate_str = '(avg: %.2f)' % (
                         1.0 * num_count / (num_total + 1e-3))
+                    percent = np.percentile(data, [50, 60, 70, 80, 90])
+                    percent_str = "Percentile: 50%%: %.2f, 60%%: %.2f, 70%%: %.2f, 80%%: %.2f, 90%%: %.2f" % tuple(
+                        percent)
                 print("Number of %s (%.1f-%.1f): %d %s" %
                       (key, thresholds[i - 1][0], thresholds[i - 1][1], num_count, rate_str))
+                if key != 'rouge_l_r_max':
+                    print("%s: %s" % (key, percent_str))
 
     txt_file.close()
 
@@ -392,28 +437,47 @@ def multi_sents_analysis(args):
     suffix = args.suffix
     split = args.split
 
-    if not exists(output_path):
-        os.mkdir(output_path)
-    output_data_path = join(output_path, split)
-    if not exists(output_data_path):
-        os.mkdir(output_data_path)
-
     n_data = count_data_by_suffix(input_path, suffix=suffix)
-    num_count = 0
-    num_switch = 0
+    txt_file = codecs.open(output_path, "w", encoding='utf-8')
+    n_repeat = 0
+    n_repeat_max = 0
+
+    def is_max_repeat(arr):
+        arr = list(map(lambda x: x[0], arr))
+        arr_uniq = np.unique(arr)
+        if len(arr_uniq) < len(arr):
+            return True
+        else:
+            return False
+
+    n_total_sent = 0
     for i in tqdm(range(n_data)):
         with open(join(input_path, '{}.{}'.format(i, suffix))) as fin:
             js_data = json.loads(fin.read())
-            num_count += len(js_data['extract_preds'])
-            out_data, n_swi = switch_rewrite_helper(
-                js_data, threshold, is_float, split, args.threshold)
-            num_switch += n_swi
-            with open(join(output_data_path, '{}.json'.format(i)),
-                      'w') as fout:
-                json.dump(out_data, fout, indent=4)
+            art_sents = js_data['article']
+            ext_idx = list(map(lambda x: list(
+                map(int, x.split(", "))), js_data['extracted']))
+            if is_max_repeat(ext_idx):
+                n_repeat_max += 1
+            ext_idx_concat = list(concat(ext_idx))
+            ext_idx_uniq = np.unique(ext_idx_concat)
+            ext_idx_max = list(map(lambda x: x[0], ext_idx))
+            if len(ext_idx_uniq) < len(ext_idx_concat):
+                n_repeat += 1
 
-    print("%s:%s Total: %d, Number of switch: %d (%.2f%%)" %
-          (split.upper(), args.threshold.upper(), num_count, num_switch, 100.0 * num_switch / (num_count + 1e-3)))
+            abs_sents = [make_html_safe(art_sents[i]) for i in ext_idx_max]
+            # import pdb
+            # pdb.set_trace()
+            abs_sents_tag = " ".join(
+                map(lambda x: "<t> %s </t>" % x, abs_sents))
+            n_total_sent += len(ext_idx_max)
+            txt_file.write(abs_sents_tag + "\n")
+
+    txt_file.close()
+    print("Total: %d, Number of repeat: %d (%.2f%%), Number of max repeat: %d (%.2f%%)" % (
+        n_data, n_repeat, 100.0 * (n_repeat / (n_data + 1e-3)), n_repeat_max, 100.0 * (n_repeat_max / (n_data + 1e-3))))
+    print("Total sentences: %d (avg: %.2f)" %
+          (n_total_sent, n_total_sent / (n_data + 1e-3)))
 
 
 def main():
@@ -422,9 +486,9 @@ def main():
                         help='function to be selected.')
     parser.add_argument('-in', '--in_path', required=True,
                         help='Path to input path.')
-    parser.add_argument('-out', '--out_path', required=True,
+    parser.add_argument('-out', '--out_path', required=False, default='./output/data_analysis',
                         help='Path to output file.')
-    parser.add_argument('-suf', '--suffix', required=True,
+    parser.add_argument('-suf', '--suffix', required=False, default='json',
                         help='Suffix of file.')
     parser.add_argument('-n_sam', '--n_samples', required=False, type=int, default=1000,
                         help='Number of samples for output file.')
@@ -435,7 +499,9 @@ def main():
     args = parser.parse_args()
 
     function = args.function
-    if function == 'count_article_sent':
+    if function == 'count_art_stats':
+        count_article_stats(args)
+    elif function == 'count_art_sent':
         count_article_sent(args)
     elif function == 'merge_to_one_file':
         merge_to_one_file(args)
@@ -445,6 +511,8 @@ def main():
         switch_rewrite(args)
     elif function == 'extract_span':
         extract_span_analysis(args)
+    elif function == 'multi_sents':
+        multi_sents_analysis(args)
     else:
         print('Unkown function name, please input again!!!')
 

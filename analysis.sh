@@ -2,7 +2,8 @@
 
 SPLIT_ALL=("val" "test")
 # THRE_ALL=("0.5" "0.6" "0.7" "0.8" "0.9")
-THRE_ALL=("ext_pred" "ext_gt")
+# THRE_ALL=("ext_pred" "ext_gt")
+THRE_ALL=("ext" "ext_ff" "ext_rl")
 
 function switch_rewrite() {
 	echo "switch_rewrite"
@@ -28,8 +29,8 @@ function merge_to_one_file() {
 		for thre in ${THRE_ALL[@]}
 		do
 			nohup python data_analysis.py -func merge_to_one_file \
-				-in "./output/data_analysis/first_run_switch_${thre}/${split_}" \
-				-out "./output/data_analysis/first_run_switch_merge/first_run_switch_${thre}_${split_}.txt" \
+				-in "./output/data_analysis/first_run_${thre}/${split_}" \
+				-out "./output/data_analysis/first_run_ext_merge/first_run_${thre}_${split_}.txt" \
 				-suf json \
 				> "logs/analysis/first_run_merge_${thre}_${split_}.log" &
 		done
@@ -42,11 +43,11 @@ function eval_rouge() {
 	do
 		for thre in ${THRE_ALL[@]}
 		do
-			nohup python my_test_rouge.py -s "./output/data_analysis/first_run_switch_merge/first_run_switch_${thre}_${split_}.txt" \
+			nohup python my_test_rouge.py -s "./output/data_analysis/first_run_ext_merge/first_run_${thre}_${split_}.txt" \
 				-t "./output/${split_}_refs.txt" \
 				-spl ${split_} \
 				-thre ${thre} \
-				> "logs/analysis/first_run_rouge_switch_${thre}_${split_}.log" &
+				> "logs/analysis/first_run_rouge_${thre}_${split_}.log" &
 		done
 	done
 }

@@ -1,4 +1,6 @@
 """ batching """
+import os
+import sys
 import random
 from collections import defaultdict
 
@@ -11,6 +13,8 @@ import torch.multiprocessing as mp
 
 
 # Batching functions
+
+
 def coll_fn(data):
     source_lists, target_lists = unzip(data)
     # NOTE: independent filtering works because
@@ -19,6 +23,7 @@ def coll_fn(data):
     targets = list(filter(bool, concat(target_lists)))
     assert all(sources) and all(targets)
     return sources, targets
+
 
 def coll_fn_extract(data):
     def is_good_data(d):
@@ -29,13 +34,26 @@ def coll_fn_extract(data):
     assert all(map(is_good_data, batch))
     return batch
 
+
+def coll_fn_multi_ext(data):
+    def is_good_data(d):
+        """ make sure data is not empty"""
+        source_sents, extracts = d
+        return source_sents and extracts
+    batch = list(filter(is_good_data, data))
+    assert all(map(is_good_data, batch))
+    return batch
+
+
 @curry
 def tokenize(max_len, texts):
     return [t.lower().split()[:max_len] for t in texts]
 
+
 def conver2id(unk, word2id, words_list):
     word2id = defaultdict(lambda: unk, word2id)
     return [[word2id[w] for w in words] for words in words_list]
+
 
 @curry
 def prepro_fn(max_src_len, max_tgt_len, batch):
@@ -44,6 +62,7 @@ def prepro_fn(max_src_len, max_tgt_len, batch):
     targets = tokenize(max_tgt_len, targets)
     batch = list(zip(sources, targets))
     return batch
+
 
 @curry
 def prepro_fn_extract(max_src_len, max_src_num, batch):
@@ -56,6 +75,24 @@ def prepro_fn_extract(max_src_len, max_src_num, batch):
     batch = list(map(prepro_one, batch))
     return batch
 
+
+@curry
+def prepro_fn_multi_ext(max_src_len, max_src_num, max_tgt_num, batch):
+    def prepro_one(sample):
+        source_sents, extracts = sample
+        tokenized_sents = tokenize(max_src_len, source_sents)[:max_src_num]
+        multi_ext = list(
+            map(lambda x: list(map(int, x.split(", "))), extracts))[:max_tgt_num]
+        cleaned_extracts = multi_ext
+        # already done in make_extraction_label.py
+        # for ele in multi_ext:
+        #     ele_filter = list(filter(lambda e: e < len(tokenized_sents), ele))
+        #     cleaned_extracts.append(ele_filter)
+        return tokenized_sents, cleaned_extracts
+    batch = list(map(prepro_one, batch))
+    return batch
+
+
 @curry
 def convert_batch(unk, word2id, batch):
     sources, targets = unzip(batch)
@@ -63,6 +100,7 @@ def convert_batch(unk, word2id, batch):
     targets = conver2id(unk, word2id, targets)
     batch = list(zip(sources, targets))
     return batch
+
 
 @curry
 def convert_batch_copy(unk, word2id, batch):
@@ -79,6 +117,7 @@ def convert_batch_copy(unk, word2id, batch):
     batch = list(zip(sources, src_exts, tar_ins, targets))
     return batch
 
+
 @curry
 def convert_batch_extract_ptr(unk, word2id, batch):
     def convert_one(sample):
@@ -87,6 +126,7 @@ def convert_batch_extract_ptr(unk, word2id, batch):
         return id_sents, extracts
     batch = list(map(convert_one, batch))
     return batch
+
 
 @curry
 def convert_batch_extract_ff(unk, word2id, batch):
@@ -97,6 +137,24 @@ def convert_batch_extract_ff(unk, word2id, batch):
         for ext in extracts:
             binary_extracts[ext] = 1
         return id_sents, binary_extracts
+    batch = list(map(convert_one, batch))
+    return batch
+
+
+@curry
+def convert_batch_multi_ext(unk, word2id, batch):
+    def convert_one(sample):
+        source_sents, multi_ext = sample
+        id_sents = conver2id(unk, word2id, source_sents)
+        binary_multi_ext = []
+        for one_step_ext in multi_ext:
+            binary_extracts = [0] * len(source_sents)
+            for ext in one_step_ext:
+                binary_extracts[ext] = 1
+
+            binary_multi_ext.append(binary_extracts)
+
+        return id_sents, multi_ext, binary_multi_ext
     batch = list(map(convert_one, batch))
     return batch
 
@@ -118,6 +176,7 @@ def pad_batch_tensorize(inputs, pad, cuda=True):
     for i, ids in enumerate(inputs):
         tensor[i, :len(ids)] = tensor_type(ids)
     return tensor
+
 
 @curry
 def batchify_fn(pad, start, end, data, cuda=True):
@@ -167,15 +226,17 @@ def batchify_fn_extract_ptr(pad, data, cuda=True):
 
     # PAD is -1 (dummy extraction index) for using sequence loss
     target = pad_batch_tensorize(targets, pad=-1, cuda=cuda)
-    remove_last = lambda tgt: tgt[:-1]
+
+    def remove_last(tgt): return tgt[:-1]
     tar_in = pad_batch_tensorize(
         list(map(remove_last, targets)),
-        pad=-0, cuda=cuda # use 0 here for feeding first conv sentence repr.
+        pad=-0, cuda=cuda  # use 0 here for feeding first conv sentence repr.
     )
 
     fw_args = (sources, src_nums, tar_in)
     loss_args = (target, )
     return fw_args, loss_args
+
 
 @curry
 def batchify_fn_extract_ff(pad, data, cuda=True):
@@ -192,6 +253,33 @@ def batchify_fn_extract_ff(pad, data, cuda=True):
     return fw_args, loss_args
 
 
+@curry
+def batchify_fn_multi_ext(pad, data, cuda=True):
+    source_lists, target_lists, binary_target_lists = tuple(
+        map(list, unzip(data)))
+
+    src_nums = list(map(len, source_lists))
+    sources = list(map(pad_batch_tensorize(pad=pad, cuda=cuda), source_lists))
+
+    tensor_type = torch.cuda.FloatTensor if cuda else torch.FloatTensor
+    tgt_nums = list(map(len, target_lists))
+
+    targets = []
+    targets_stop = []
+    for tgt, binary_tgt in zip(target_lists, binary_target_lists):
+        binary_stop = [0] * (len(tgt) + 1)
+        binary_stop[-1] = 1
+
+        tgt_tensor = tensor_type(list(concat(binary_tgt)))
+        targets.append(tgt_tensor)
+        binary_stop = tensor_type(binary_stop)
+        targets_stop.append(binary_stop)
+
+    fw_args = (sources, target_lists, src_nums, tgt_nums)
+    loss_args = (targets, targets_stop)
+    return fw_args, loss_args
+
+
 def _batch2q(loader, prepro, q, single_run=True):
     epoch = 0
     while True:
@@ -202,6 +290,7 @@ def _batch2q(loader, prepro, q, single_run=True):
         epoch += 1
         q.put(epoch)
     q.put(None)
+
 
 class BucketedGenerater(object):
     def __init__(self, loader, prepro,
@@ -229,7 +318,7 @@ class BucketedGenerater(object):
                 random.shuffle(indexes)
             hyper_batch.sort(key=self._sort_key)
             for i in indexes:
-                batch = self._batchify(hyper_batch[i:i+batch_size])
+                batch = self._batchify(hyper_batch[i:i + batch_size])
                 yield batch
 
         if self._queue is not None:

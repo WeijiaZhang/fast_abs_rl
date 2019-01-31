@@ -7,11 +7,13 @@ from datetime import timedelta
 import multiprocessing as mp
 
 from cytoolz import curry, compose
-
-from utils import count_data
-from metric import compute_rouge_n, compute_rouge_l, compute_rouge_l_summ
 from nltk.stem import SnowballStemmer
 from heapq import nlargest
+
+from utils import MAX_SENT_ART
+from utils import count_data
+from metric import compute_rouge_n, compute_rouge_l, compute_rouge_l_summ
+
 
 # try:
 #     DATA_DIR = os.environ['DATA']
@@ -19,7 +21,8 @@ from heapq import nlargest
 #     print('please use environment variable to specify data directories')
 # DATA_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/fast_abs_rl/finished_files'
 # DATA_DIR = '/home/zhangwj/code/nlp/summarization/fast_abs_rl/output/data_analysis/multi_extract'
-DATA_DIR = '/home/zhangwj/code/nlp/summarization/fast_abs_rl/output/data_analysis/max_rouge_l'
+# DATA_DIR = '/home/zhangwj/code/nlp/summarization/fast_abs_rl/output/data_analysis/max_rouge_l'
+DATA_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/multi_ext'
 
 
 def _split_words(texts):
@@ -94,11 +97,19 @@ def get_max_rouge_l(art_sents, abs_sents, mode='r', thre=0.69):
         # ext = max(indices, key=lambda i: rouges[i])
         indices_sorted = sorted(
             indices, key=lambda i: rouges_l[i], reverse=True)
-        ext_idx = [indices_sorted[0]]
-        init_summs = [art_sents_stem[ext_idx[0]]]
+        init_idx = 0
+        max_sent_nums = MAX_SENT_ART - 1
+        while init_idx < len(indices_sorted) and indices_sorted[init_idx] > max_sent_nums:
+            init_idx += 1
+
+        init_ext_idx = indices_sorted[init_idx]
+        ext_idx = [init_ext_idx]
+        init_summs = [art_sents_stem[init_ext_idx]]
         refs = [abst_stem]
         init_rouge_l = compute_rouge_l_summ(init_summs, refs, mode=mode)
-        for idx in indices_sorted[1:]:
+        for idx in indices_sorted[init_idx + 1:]:
+            if idx > max_sent_nums:
+                continue
             if (init_rouge_l - thre) > 0.01 and (rouges_l[idx] - 0.49) < 0.01:
                 break
             after_summs = init_summs + [art_sents_stem[idx]]
@@ -222,8 +233,8 @@ def label(split):
 
 
 def main():
-    # split_all = ['val', 'train']
-    split_all = ['val']
+    split_all = ['val', 'train']
+    # split_all = ['val']
     for split in split_all:  # no need of extraction label when testing
         # label(split)
         label_mp(split)

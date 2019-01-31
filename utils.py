@@ -11,7 +11,8 @@ from torch import nn
 def count_data(path):
     """ count number of data in the given path"""
     matcher = re.compile(r'[0-9]+\.json')
-    match = lambda name: bool(matcher.match(name))
+
+    def match(name): return bool(matcher.match(name))
     names = os.listdir(path)
     n_data = len(list(filter(match, names)))
     return n_data
@@ -21,6 +22,17 @@ PAD = 0
 UNK = 1
 START = 2
 END = 3
+
+# maximun sentences in a article
+MAX_SENT_ART = 60
+# maximun sentences in a abstract
+MAX_SENT_ABS = 10
+# maximun words in a single article sentence
+MAX_WORD_ART = 100
+# maximun words in a single abstract sentence
+MAX_WORD_ABS = 30
+
+
 def make_vocab(wc, vocab_size):
     word2id, id2word = {}, {}
     word2id['<pad>'] = PAD
@@ -33,7 +45,7 @@ def make_vocab(wc, vocab_size):
 
 
 def make_embedding(id2word, w2v_file, initializer=None):
-    attrs = basename(w2v_file).split('.')  #word2vec.{dim}d.{vsize}k.bin
+    attrs = basename(w2v_file).split('.')  # word2vec.{dim}d.{vsize}k.bin
     w2v = gensim.models.Word2Vec.load(w2v_file).wv
     vocab_size = len(id2word)
     emb_dim = int(attrs[-3][:-1])

@@ -30,14 +30,19 @@ def get_basic_grad_fn(net, clip_grad, max_grad=1e2):
 
 
 @curry
-def compute_loss(net, criterion, fw_args, loss_args):
-    loss = criterion(*((net(*fw_args),) + loss_args))
+def compute_loss(net, criterion, fw_args, bw_args):
+    net_out = net(*fw_args)
+    if isinstance(net_out, tuple):
+        loss_args = net_out + bw_args
+    else:
+        loss_args = (net_out, ) + bw_args
+    loss = criterion(*loss_args)
     return loss
 
 
 @curry
-def val_step(loss_step, fw_args, loss_args):
-    loss = loss_step(fw_args, loss_args)
+def val_step(loss_step, fw_args, bw_args):
+    loss = loss_step(fw_args, bw_args)
     return loss.size(0), loss.sum().item()
 
 

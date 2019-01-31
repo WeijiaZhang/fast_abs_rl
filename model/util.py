@@ -17,14 +17,16 @@ def len_mask(lens, device):
         mask[i, :l].fill_(1)
     return mask
 
+
 def sequence_mean(sequence, seq_lens, dim=1):
     if seq_lens:
         assert sequence.size(0) == len(seq_lens)   # batch_size
         sum_ = torch.sum(sequence, dim=dim, keepdim=False)
-        mean = torch.stack([s/l for s, l in zip(sum_, seq_lens)], dim=0)
+        mean = torch.stack([s / l for s, l in zip(sum_, seq_lens)], dim=0)
     else:
         mean = torch.mean(sequence, dim=dim, keepdim=False)
     return mean
+
 
 def sequence_loss(logits, targets, xent_fn=None, pad_idx=0):
     """ functional interface of SequenceLoss"""
@@ -43,8 +45,36 @@ def sequence_loss(logits, targets, xent_fn=None, pad_idx=0):
             and not math.isinf(loss.mean().item()))
     return loss
 
+# def multi_stop_loss(logits, targets, xent_fn=None, pad_idx=-1):
+#     assert len(logits) == len(targets)
+#     mask =
+
+
+def multi_step_loss(logits, targets, xent_fn=None):
+    """ functional interface of MultiStepLoss
+    logits: a list of tensors
+    tatget: a list of tensors (with same shape with logits)
+    """
+    assert len(logits) == len(targets)
+    loss_list = []
+    for lo, tgt in zip(logits, targets):
+        loss = xent_fn(lo, tgt).mean(dim=0, keepdim=True)
+        loss_list.append(loss)
+
+    loss_all = torch.cat(loss_list, dim=0)
+    return loss_all
+
+
+def multi_loss(logits, logits_stop, targets, targets_stop, xent_fn=None, xent_fn_stop=None):
+    loss_step = multi_step_loss(
+        logits, targets, xent_fn=xent_fn)
+    loss_stop = multi_step_loss(
+        logits_stop, targets_stop, xent_fn=xent_fn_stop)
+    loss_all = loss_step + loss_stop
+    return loss_all
 
 #################### LSTM helper #########################
+
 
 def reorder_sequence(sequence_emb, order, batch_first=False):
     """
@@ -58,6 +88,7 @@ def reorder_sequence(sequence_emb, order, batch_first=False):
     sorted_ = sequence_emb.index_select(index=order, dim=batch_dim)
 
     return sorted_
+
 
 def reorder_lstm_states(lstm_states, order):
     """

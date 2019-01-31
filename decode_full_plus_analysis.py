@@ -2,7 +2,7 @@
 import argparse
 import json
 import os
-from os.path import join
+from os.path import join, exists
 from datetime import timedelta
 from time import time
 from collections import Counter, defaultdict
@@ -18,7 +18,7 @@ from torch import multiprocessing as mp
 
 from data.batcher import tokenize
 
-from decoding import Abstractor, RLExtractor, DecodeDataset, AnalysisDataset, BeamAbstractor
+from decoding import Abstractor, RLExtractor, Extractor, DecodeDataset, AnalysisDataset, BeamAbstractor
 from decoding import make_html_safe
 from evaluate import eval_rouge_by_cmd
 
@@ -39,24 +39,46 @@ def format_rouge(summaries, references, split='test', threshold='0.5'):
 
 
 def decode(save_path, model_dir, split, batch_size,
-           beam_size, diverse, max_len, cuda):
+           beam_size, diverse, max_len, cuda, method='abs_rl'):
+    method_all = ['ext', 'ext_ff', 'ext_rl', 'abs', 'abs_rl']
+    assert method in method_all
+    thre = 0.1
+    thre_dict = defaultdict(int)
+    for me in method_all:
+        thre_dict[me] = thre
+        thre += 0.1
+
     start = time()
     # setup model
     with open(join(model_dir, 'meta.json')) as f:
         meta = json.loads(f.read())
-    if meta['net_args']['abstractor'] is None:
+
+    if 'extractor' in meta['net_args']:
+        ext_str = meta['net_args']['extractor']
+    else:
+        ext_str = meta['net']
+
+    if method in ['ext', 'ext_ff', 'ext_rl'] or 'abstractor' not in meta['net_args']:
         # NOTE: if no abstractor is provided then
         #       the whole model would be extractive summarization
         assert beam_size == 1
+        abs_str = "None"
         abstractor = identity
     else:
+        abs_str = meta['net_args']['abstractor']
         if beam_size == 1:
             abstractor = Abstractor(join(model_dir, 'abstractor'),
                                     max_len, cuda)
         else:
             abstractor = BeamAbstractor(join(model_dir, 'abstractor'),
                                         max_len, cuda)
-    extractor = RLExtractor(model_dir, cuda=cuda)
+
+    if method in ['abs', 'ext', 'ext_ff']:
+        extractor = Extractor(model_dir, cuda=cuda)
+        is_rl = False
+    else:
+        extractor = RLExtractor(model_dir, cuda=cuda)
+        is_rl = True
 
     # setup loader
     def coll(batch):
@@ -72,15 +94,15 @@ def decode(save_path, model_dir, split, batch_size,
     )
 
     # prepare save paths and logs
-    if not os.path.isdir(save_path):
+    if not exists(save_path):
         os.makedirs(save_path)
     dec_path = join(save_path, split)
-    if not os.path.isdir(dec_path):
+    if not exists(dec_path):
         os.makedirs(dec_path)
     dec_log = {}
-    dec_log['abstractor'] = meta['net_args']['abstractor']
-    dec_log['extractor'] = meta['net_args']['extractor']
-    dec_log['rl'] = True
+    dec_log['abstractor'] = abs_str
+    dec_log['extractor'] = ext_str
+    dec_log['rl'] = is_rl
     dec_log['split'] = split
     dec_log['beam'] = beam_size
     dec_log['diverse'] = diverse
@@ -97,14 +119,20 @@ def decode(save_path, model_dir, split, batch_size,
             ext_inds = []
             ext_preds = []
             for raw_art_sents in tokenized_article_batch:
-                ext = extractor(raw_art_sents)[:-1]  # exclude EOE
+                if isinstance(extractor, Extractor):
+                    ext = extractor(raw_art_sents)
+                else:
+                    ext = extractor(raw_art_sents)[:-1]  # exclude EOE
                 if not ext:
                     # use top-5 if nothing is extracted
                     # in some rare cases rnn-ext does not extract at all
                     ext = list(range(5))[:len(raw_art_sents)]
                     is_top5_all.append(True)
                 else:
-                    ext = [i.item() for i in ext]
+                    if isinstance(extractor, Extractor):
+                        ext = [i for i in ext]
+                    else:
+                        ext = [i.item() for i in ext]
                     is_top5_all.append(False)
                 ext_inds += [(len(ext_arts), len(ext))]
                 ext_preds += ext
@@ -129,7 +157,7 @@ def decode(save_path, model_dir, split, batch_size,
                 out_data['extract_preds'] = ext_preds[j:j + n]
                 # calculating rouge score
                 rouge_str = format_rouge(
-                    [decoded_sents], [out_data['abstract']], split=split)
+                    [decoded_sents], [out_data['abstract']], split=split, threshold=thre_dict[method])
                 out_data['rouge'] = rouge_str
                 out_data['is_top'] = is_top5_all[i]
                 if split == 'val':
@@ -211,6 +239,8 @@ if __name__ == '__main__':
     parser.add_argument('--max_dec_word', type=int, action='store', default=30,
                         help='maximun words to be decoded for the abstractor')
 
+    parser.add_argument('--method', type=str, action='store', default='abs',
+                        help='methods for getting summarization')
     parser.add_argument('--no-cuda', action='store_true',
                         help='disable GPU training')
     args = parser.parse_args()
@@ -219,4 +249,4 @@ if __name__ == '__main__':
     data_split = 'test' if args.test else 'val'
     decode(args.path, args.model_dir,
            data_split, args.batch, args.beam, args.div,
-           args.max_dec_word, args.cuda)
+           args.max_dec_word, args.cuda, args.method)

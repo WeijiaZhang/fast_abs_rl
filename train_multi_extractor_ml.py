@@ -13,18 +13,18 @@ from torch.nn import functional as F
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 
-from model.extract import ExtractSumm, PtrExtractSumm
-from model.util import sequence_loss
+# from model.extract import ExtractSumm, PtrExtractSumm
+from model.multi_extract import MultiExtractSumm
+from model.util import sequence_loss, multi_loss
 from training import get_basic_grad_fn, basic_validate
 from training import BasicPipeline, BasicTrainer
 
-from utils import PAD, UNK
+from utils import PAD, UNK, MAX_SENT_ART, MAX_SENT_ABS, MAX_WORD_ART, MAX_WORD_ABS
 from utils import make_vocab, make_embedding
 
 from data.data import CnnDmDataset
-from data.batcher import coll_fn_extract, prepro_fn_extract
-from data.batcher import convert_batch_extract_ff, batchify_fn_extract_ff
-from data.batcher import convert_batch_extract_ptr, batchify_fn_extract_ptr
+from data.batcher import coll_fn_multi_ext, prepro_fn_multi_ext
+from data.batcher import convert_batch_multi_ext, batchify_fn_multi_ext
 from data.batcher import BucketedGenerater
 
 
@@ -34,7 +34,8 @@ BUCKET_SIZE = 6400
 #     DATA_DIR = os.environ['DATA']
 # except KeyError:
 #     print('please use environment variable to specify data directories')
-DATA_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/fast_abs_rl/finished_files'
+# DATA_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/fast_abs_rl/finished_files'
+DATA_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/multi_ext'
 
 
 class ExtractDataset(CnnDmDataset):
@@ -52,16 +53,20 @@ class ExtractDataset(CnnDmDataset):
 
 
 def build_batchers(net_type, word2id, cuda, debug):
-    assert net_type in ['ff', 'rnn']
-    prepro = prepro_fn_extract(args.max_word, args.max_sent)
+    assert net_type in ['multi']
+    prepro = prepro_fn_multi_ext(
+        args.max_word, args.max_sent_art, args.max_sent_abs)
 
     def sort_key(sample):
         src_sents, _ = sample
         return len(src_sents)
-    batchify_fn = (batchify_fn_extract_ff if net_type == 'ff'
-                   else batchify_fn_extract_ptr)
-    convert_batch = (convert_batch_extract_ff if net_type == 'ff'
-                     else convert_batch_extract_ptr)
+    # batchify_fn = (batchify_fn_extract_ff if net_type == 'ff'
+    #                else batchify_fn_extract_ptr)
+    # convert_batch = (convert_batch_extract_ff if net_type == 'ff'
+    #                  else convert_batch_extract_ptr)
+
+    batchify_fn = batchify_fn_multi_ext
+    convert_batch = convert_batch_multi_ext
     batchify = compose(batchify_fn(PAD, cuda=cuda),
                        convert_batch(UNK, word2id))
 
@@ -69,7 +74,7 @@ def build_batchers(net_type, word2id, cuda, debug):
         ExtractDataset('train'), batch_size=BUCKET_SIZE,
         shuffle=not debug,
         num_workers=4 if cuda and not debug else 0,
-        collate_fn=coll_fn_extract
+        collate_fn=coll_fn_multi_ext
     )
     train_batcher = BucketedGenerater(train_loader, prepro, sort_key, batchify,
                                       single_run=False, fork=not debug)
@@ -77,7 +82,7 @@ def build_batchers(net_type, word2id, cuda, debug):
     val_loader = DataLoader(
         ExtractDataset('val'), batch_size=BUCKET_SIZE,
         shuffle=False, num_workers=4 if cuda and not debug else 0,
-        collate_fn=coll_fn_extract
+        collate_fn=coll_fn_multi_ext
     )
     val_batcher = BucketedGenerater(val_loader, prepro, sort_key, batchify,
                                     single_run=True, fork=not debug)
@@ -86,7 +91,8 @@ def build_batchers(net_type, word2id, cuda, debug):
 
 def configure_net(net_type, vocab_size, emb_dim, conv_hidden,
                   lstm_hidden, lstm_layer, bidirectional):
-    assert net_type in ['ff', 'rnn']
+    # assert net_type in ['ff', 'rnn']
+    assert net_type in ['multi']
     net_args = {}
     net_args['vocab_size'] = vocab_size
     net_args['emb_dim'] = emb_dim
@@ -95,15 +101,17 @@ def configure_net(net_type, vocab_size, emb_dim, conv_hidden,
     net_args['lstm_layer'] = lstm_layer
     net_args['bidirectional'] = bidirectional
 
-    net = (ExtractSumm(**net_args) if net_type == 'ff'
-           else PtrExtractSumm(**net_args))
+    # net = (ExtractSumm(**net_args) if net_type == 'ff'
+    #        else PtrExtractSumm(**net_args))
+    net = MultiExtractSumm(**net_args)
     return net, net_args
 
 
 def configure_training(net_type, opt, lr, clip_grad, lr_decay, batch_size):
     """ supports Adam optimizer only"""
     assert opt in ['adam']
-    assert net_type in ['ff', 'rnn']
+    # assert net_type in ['ff', 'rnn']
+    assert net_type in ['multi']
     opt_kwargs = {}
     opt_kwargs['lr'] = lr
 
@@ -115,10 +123,16 @@ def configure_training(net_type, opt, lr, clip_grad, lr_decay, batch_size):
 
     if net_type == 'ff':
         def criterion(logit, target): return F.binary_cross_entropy_with_logits(
-            logit, target, reduce=False)
+            logit, target, reduction='none')
+    elif net_type == 'multi':
+        def bce(logit, target): return F.binary_cross_entropy_with_logits(
+            logit, target, reduction='none')
+
+        def criterion(logits, logits_stop, targets, targets_stop):
+            return multi_loss(logits, logits_stop, targets, targets_stop, xent_fn=bce, xent_fn_stop=bce)
     else:
         def ce(logit, target): return F.cross_entropy(
-            logit, target, reduce=False)
+            logit, target, reduction='none')
 
         def criterion(logits, targets):
             return sequence_loss(logits, targets, ce, pad_idx=-1)
@@ -127,7 +141,8 @@ def configure_training(net_type, opt, lr, clip_grad, lr_decay, batch_size):
 
 
 def main(args):
-    assert args.net_type in ['ff', 'rnn']
+    # assert args.net_type in ['ff', 'rnn', 'multi']
+    assert args.net_type in ['multi']
     # create data batcher, vocabulary
     # batcher
     with open(join(DATA_DIR, 'vocab_cnt.pkl'), 'rb') as f:
@@ -192,12 +207,14 @@ if __name__ == '__main__':
     parser.add_argument('--path', required=True, help='root of the model')
 
     # model options
-    parser.add_argument('--net_type', action='store', default='rnn',
-                        help='model type of the extractor (ff/rnn)')
+    parser.add_argument('--net_type', action='store', default='multi',
+                        help='model type of the extractor (multi)')
     parser.add_argument('--vsize', type=int, action='store', default=30000,
                         help='vocabulary size')
     parser.add_argument('--emb_dim', type=int, action='store', default=128,
                         help='the dimension of word embedding')
+    # parser.add_argument('--emb_dim_idx', type=int, action='store', default=128,
+    #                     help='the dimension of extracted idx embedding')
     parser.add_argument('--w2v', action='store',
                         help='use pretrained word2vec embedding')
     parser.add_argument('--conv_hidden', type=int, action='store', default=100,
@@ -210,9 +227,11 @@ if __name__ == '__main__':
                         help='disable bidirectional LSTM encoder')
 
     # length limit
-    parser.add_argument('--max_word', type=int, action='store', default=100,
+    parser.add_argument('--max_word', type=int, action='store', default=MAX_WORD_ART,
                         help='maximun words in a single article sentence')
-    parser.add_argument('--max_sent', type=int, action='store', default=60,
+    parser.add_argument('--max_sent_art', type=int, action='store', default=MAX_SENT_ART,
+                        help='maximun sentences in an article article')
+    parser.add_argument('--max_sent_abs', type=int, action='store', default=MAX_SENT_ABS,
                         help='maximun sentences in an article article')
     # training options
     parser.add_argument('--lr', type=float, action='store', default=1e-3,
