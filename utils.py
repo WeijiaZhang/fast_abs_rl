@@ -32,6 +32,9 @@ MAX_WORD_ART = 100
 # maximun words in a single abstract sentence
 MAX_WORD_ABS = 30
 
+# num classes of rerank
+NUM_CLASSES_RERANK = 4
+
 
 def make_vocab(wc, vocab_size):
     word2id, id2word = {}, {}

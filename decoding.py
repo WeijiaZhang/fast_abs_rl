@@ -13,6 +13,8 @@ import torch
 from utils import PAD, UNK, START, END
 from model.copy_summ import CopySumm
 from model.extract import ExtractSumm, PtrExtractSumm
+from model.multi_extract import MultiExtractSumm
+from model.rerank_extract import RerankExtractSumm
 from model.rl import ActorCritic
 from data.batcher import conver2id, pad_batch_tensorize
 from data.data import CnnDmDataset
@@ -23,14 +25,22 @@ from data.data import CnnDmDataset
 # except KeyError:
 #     print('please use environment variable to specify data directories')
 DATASET_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/fast_abs_rl/finished_files'
+MULTI_DATASET_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/multi_ext'
+RERANK_DDATASET_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/rerank'
 
 
 class AnalysisDataset(CnnDmDataset):
     """ get the article sentences only (for decoding use)"""
 
-    def __init__(self, split):
+    def __init__(self, split, dec_type='single'):
         assert split in ['val', 'test']
-        super().__init__(split, DATASET_DIR)
+        if dec_type == 'multi':
+            data_dir = MULTI_DATASET_DIR
+        elif dec_type == 'rerank':
+            data_dir = RERANK_DDATASET_DIR
+        else:
+            data_dir = DATASET_DIR
+        super().__init__(split, data_dir)
 
     def __getitem__(self, i):
         js_data = super().__getitem__(i)
@@ -40,9 +50,15 @@ class AnalysisDataset(CnnDmDataset):
 class DecodeDataset(CnnDmDataset):
     """ get the article sentences only (for decoding use)"""
 
-    def __init__(self, split):
+    def __init__(self, split, dec_type='single'):
         assert split in ['val', 'test']
-        super().__init__(split, DATASET_DIR)
+        if dec_type == 'multi':
+            data_dir = MULTI_DATASET_DIR
+        elif dec_type == 'rerank':
+            data_dir = RERANK_DDATASET_DIR
+        else:
+            data_dir = DATASET_DIR
+        super().__init__(split, data_dir)
 
     def __getitem__(self, i):
         js_data = super().__getitem__(i)
@@ -71,7 +87,7 @@ def load_best_ckpt(model_dir, reverse=False):
 class Abstractor(object):
     def __init__(self, abs_dir, max_len=30, cuda=True):
         abs_meta = json.load(open(join(abs_dir, 'meta.json')))
-        assert abs_meta['net'] == 'base_abstractor'
+        assert 'abstractor' in abs_meta['net']
         abs_args = abs_meta['net_args']
         abs_ckpt = load_best_ckpt(abs_dir)
         word2id = pkl.load(open(join(abs_dir, 'vocab.pkl'), 'rb'))
@@ -180,6 +196,60 @@ class Extractor(object):
         article = pad_batch_tensorize(articles, PAD, cuda=False
                                       ).to(self._device)
         indices = self._net.extract([article], k=min(n_art, self._max_ext))
+        return indices
+
+
+class MultiExtractor(object):
+    def __init__(self, ext_dir, max_dec_step=10, thre=0.5, cuda=True):
+        ext_meta = json.load(open(join(ext_dir, 'meta.json')))
+        ext_cls = MultiExtractSumm
+        ext_ckpt = load_best_ckpt(ext_dir)
+        ext_args = ext_meta['net_args']
+        extractor = ext_cls(**ext_args)
+        extractor.load_state_dict(ext_ckpt)
+        word2id = pkl.load(open(join(ext_dir, 'vocab.pkl'), 'rb'))
+        self._device = torch.device('cuda' if cuda else 'cpu')
+        self._net = extractor.to(self._device)
+        self._word2id = word2id
+        self._id2word = {i: w for w, i in word2id.items()}
+        self._max_dec_step = max_dec_step
+        self._thre = thre
+
+    def __call__(self, raw_article_sents):
+        self._net.eval()
+        n_art = len(raw_article_sents)
+        articles = conver2id(UNK, self._word2id, raw_article_sents)
+        article = pad_batch_tensorize(articles, PAD, cuda=False
+                                      ).to(self._device)
+        indices = self._net.extract(
+            [article], max_dec_step=min(n_art, self._max_dec_step), thre=self._thre)
+        return indices
+
+
+class RerankAllExtractor(object):
+    def __init__(self, ext_dir, max_dec_step=10, thre=0.5, cuda=True):
+        ext_meta = json.load(open(join(ext_dir, 'meta.json')))
+        ext_cls = RerankExtractSumm
+        ext_ckpt = load_best_ckpt(ext_dir)
+        ext_args = ext_meta['net_args']
+        extractor = ext_cls(**ext_args)
+        extractor.load_state_dict(ext_ckpt)
+        word2id = pkl.load(open(join(ext_dir, 'vocab.pkl'), 'rb'))
+        self._device = torch.device('cuda' if cuda else 'cpu')
+        self._net = extractor.to(self._device)
+        self._word2id = word2id
+        self._id2word = {i: w for w, i in word2id.items()}
+        self._max_dec_step = max_dec_step
+        self._thre = thre
+
+    def __call__(self, raw_article_sents):
+        self._net.eval()
+        n_art = len(raw_article_sents)
+        articles = conver2id(UNK, self._word2id, raw_article_sents)
+        article = pad_batch_tensorize(articles, PAD, cuda=False
+                                      ).to(self._device)
+        indices = self._net.extract(
+            [article], max_dec_step=min(n_art, self._max_dec_step), thre=self._thre)
         return indices
 
 

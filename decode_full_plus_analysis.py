@@ -18,7 +18,9 @@ from torch import multiprocessing as mp
 
 from data.batcher import tokenize
 
-from decoding import Abstractor, RLExtractor, Extractor, DecodeDataset, AnalysisDataset, BeamAbstractor
+from utils import PAD, UNK, START, END, MAX_SENT_ART, MAX_SENT_ABS, MAX_WORD_ART, MAX_WORD_ABS
+from decoding import DecodeDataset, AnalysisDataset, Abstractor, BeamAbstractor
+from decoding import RLExtractor, Extractor, MultiExtractor, RerankAllExtractor
 from decoding import make_html_safe
 from evaluate import eval_rouge_by_cmd
 
@@ -39,8 +41,9 @@ def format_rouge(summaries, references, split='test', threshold='0.5'):
 
 
 def decode(save_path, model_dir, split, batch_size,
-           beam_size, diverse, max_len, cuda, method='abs_rl'):
-    method_all = ['ext', 'ext_ff', 'ext_rl', 'abs', 'abs_rl']
+           beam_size, diverse, max_len, cuda, method, max_dec_step, thre_ext):
+    method_all = ['ext', 'ext_ff', 'ext_rl', 'multi_ext', 'rerank_ext',
+                  'abs_only', 'multi_abs_only', 'abs', 'abs_rl']
     assert method in method_all
     thre = 0.1
     thre_dict = defaultdict(int)
@@ -53,39 +56,59 @@ def decode(save_path, model_dir, split, batch_size,
     with open(join(model_dir, 'meta.json')) as f:
         meta = json.loads(f.read())
 
-    if 'extractor' in meta['net_args']:
+    if method in ['abs_only', 'multi_abs_only']:
+        ext_str = 'None'
+    elif 'extractor' in meta['net_args']:
         ext_str = meta['net_args']['extractor']
     else:
         ext_str = meta['net']
 
-    if method in ['ext', 'ext_ff', 'ext_rl'] or 'abstractor' not in meta['net_args']:
+    if method in ['multi_ext', 'ext', 'ext_ff', 'ext_rl']:
         # NOTE: if no abstractor is provided then
         #       the whole model would be extractive summarization
         assert beam_size == 1
         abs_str = "None"
         abstractor = identity
     else:
-        abs_str = meta['net_args']['abstractor']
-        if beam_size == 1:
-            abstractor = Abstractor(join(model_dir, 'abstractor'),
-                                    max_len, cuda)
+        if 'abstractor' not in meta['net_args']:
+            abs_str = meta['net']
+            abs_path = model_dir
         else:
-            abstractor = BeamAbstractor(join(model_dir, 'abstractor'),
-                                        max_len, cuda)
+            abs_str = meta['net_args']['abstractor']
+            abs_path = join(model_dir, 'abstractor')
 
-    if method in ['abs', 'ext', 'ext_ff']:
+        if beam_size == 1:
+            abstractor = Abstractor(abs_path, max_len, cuda)
+        else:
+            abstractor = BeamAbstractor(abs_path, max_len, cuda)
+
+    is_rl = False
+    dec_type = 'single'
+    if 'multi' in method:
+        dec_type = 'multi'
+    elif 'rerank' in method:
+        dec_type = 'rerank'
+
+    if method in ['abs_only', 'multi_abs_only']:
+        extractor = identity
+    elif method in ['abs', 'ext', 'ext_ff']:
         extractor = Extractor(model_dir, cuda=cuda)
-        is_rl = False
+    elif method in ['multi_ext']:
+        extractor = MultiExtractor(
+            model_dir, max_dec_step=max_dec_step, thre=thre_ext, cuda=cuda)
+    elif method in ['rerank_ext']:
+        extractor =
     else:
-        extractor = RLExtractor(model_dir, cuda=cuda)
         is_rl = True
+        extractor = RLExtractor(model_dir, cuda=cuda)
 
     # setup loader
     def coll(batch):
         articles = list(filter(bool, batch))
         return articles
-    dataset = DecodeDataset(split)
-    analysis_dataset = AnalysisDataset(split)
+
+    dataset = DecodeDataset(split, dec_type=dec_type)
+    analysis_dataset = AnalysisDataset(split, dec_type=dec_type)
 
     n_data = len(dataset)
     loader = DataLoader(
@@ -112,6 +135,7 @@ def decode(save_path, model_dir, split, batch_size,
     # Decoding
     i = 0
     is_top5_all = []
+    i_abs = 0
     with torch.no_grad():
         for i_debug, raw_article_batch in enumerate(loader):
             tokenized_article_batch = map(tokenize(None), raw_article_batch)
@@ -119,24 +143,48 @@ def decode(save_path, model_dir, split, batch_size,
             ext_inds = []
             ext_preds = []
             for raw_art_sents in tokenized_article_batch:
-                if isinstance(extractor, Extractor):
+                if isinstance(extractor, type(identity)):
+                    ext = analysis_dataset[i_abs]['extracted']
+                    if dec_type == 'multi':
+                        ext = list(
+                            map(lambda x: list(map(int, x.split(", "))), ext))
+                    i_abs += 1
+                elif isinstance(extractor, Extractor) or isinstance(extractor, MultiExtractor):
                     ext = extractor(raw_art_sents)
                 else:
                     ext = extractor(raw_art_sents)[:-1]  # exclude EOE
+
                 if not ext:
                     # use top-5 if nothing is extracted
                     # in some rare cases rnn-ext does not extract at all
-                    ext = list(range(5))[:len(raw_art_sents)]
+                    if isinstance(extractor, MultiExtractor):
+                        ext = [[i] for i in range(5)][:len(raw_art_sents)]
+                    else:
+                        ext = list(range(5))[:len(raw_art_sents)]
                     is_top5_all.append(True)
                 else:
-                    if isinstance(extractor, Extractor):
-                        ext = [i for i in ext]
-                    else:
+                    if isinstance(extractor, RLExtractor):
                         ext = [i.item() for i in ext]
                     is_top5_all.append(False)
+
                 ext_inds += [(len(ext_arts), len(ext))]
-                ext_preds += ext
-                ext_arts += [raw_art_sents[i] for i in ext]
+                if dec_type == 'multi':
+                    if isinstance(extractor, MultiExtractor):
+                        sents = [raw_art_sents[ele[0]] for ele in ext]
+                    else:
+                        sents = [
+                            list(concat(map(lambda x: raw_art_sents[x], ele))) for ele in ext]
+                    ext_str = [", ".join(map(str, ele)) for ele in ext]
+                else:
+                    sents = [raw_art_sents[i] for i in ext]
+                    ext_str = ext
+                ext_arts += sents
+                ext_preds += ext_str
+
+            # if i_abs <= 11552:
+            #     i += len(ext_inds)
+            #     continue
+
             if beam_size > 1:
                 all_beams = abstractor(ext_arts, beam_size, diverse)
                 dec_outs = rerank_mp(all_beams, ext_inds)
@@ -161,7 +209,11 @@ def decode(save_path, model_dir, split, batch_size,
                 out_data['rouge'] = rouge_str
                 out_data['is_top'] = is_top5_all[i]
                 if split == 'val':
-                    out_data['score'] = js_data['score']
+                    if dec_type == 'multi':
+                        out_data['rouge_l_r'] = js_data['rouge_l_r']
+                        out_data['rouge_l_r_max'] = js_data['rouge_l_r_max']
+                    else:
+                        out_data['score'] = js_data['score']
                 with open(join(save_path, split, '{}.json'.format(i)),
                           'w') as f:
                         # f.write(('\n'.join(decoded_sents)))
@@ -236,8 +288,12 @@ if __name__ == '__main__':
                         help='beam size for beam-search (reranking included)')
     parser.add_argument('--div', type=float, action='store', default=1.0,
                         help='diverse ratio for the diverse beam-search')
-    parser.add_argument('--max_dec_word', type=int, action='store', default=30,
+    parser.add_argument('--max_dec_word', type=int, action='store', default=MAX_WORD_ABS,
                         help='maximun words to be decoded for the abstractor')
+    parser.add_argument('--max_dec_step', type=int, action='store', default=10,
+                        help='maximun sentences to be decoded for the abstractor')
+    parser.add_argument('--thre_ext', type=float, action='store', default=0.5,
+                        help='threshold value for the multi-extractor')
 
     parser.add_argument('--method', type=str, action='store', default='abs',
                         help='methods for getting summarization')
@@ -249,4 +305,4 @@ if __name__ == '__main__':
     data_split = 'test' if args.test else 'val'
     decode(args.path, args.model_dir,
            data_split, args.batch, args.beam, args.div,
-           args.max_dec_word, args.cuda, args.method)
+           args.max_dec_word, args.cuda, args.method, args.max_dec_step, args.thre_ext)

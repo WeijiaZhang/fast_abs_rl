@@ -22,7 +22,7 @@ from metric import compute_rouge_n, compute_rouge_l, compute_rouge_l_summ
 # DATA_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/fast_abs_rl/finished_files'
 # DATA_DIR = '/home/zhangwj/code/nlp/summarization/fast_abs_rl/output/data_analysis/multi_extract'
 # DATA_DIR = '/home/zhangwj/code/nlp/summarization/fast_abs_rl/output/data_analysis/max_rouge_l'
-DATA_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/multi_ext'
+DATA_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/rerank'
 
 
 def _split_words(texts):
@@ -137,6 +137,47 @@ def get_max_rouge_l(art_sents, abs_sents, mode='r', thre=0.69):
     return extracted, scores
 
 
+def get_rerank(art_sents, abs_sents, mode='r'):
+    """ greedily match summary sentences to article sentences"""
+    extracted = []
+    scores_l = []
+    labels_l = []
+    # thresholds = [(0, 0.1), (0.1, 0.2), (0.2, 0.3), (0.3, 0.4), (0.4, 0.5), (0.5, 0.6),
+    #               (0.6, 0.7), (0.7, 0.8), (0.8, 0.9), (0.9, 1.1)]
+    # thresholds = [(0, 0.2), (0.2, 0.3), (0.3, 0.4),
+    #               (0.4, 0.5), (0.5, 0.7), (0.7, 1.1)]
+    # thresholds = [(0, 0.2), (0.2, 0.25), (0.25, 0.3),
+    #               (0.3, 0.35), (0.35, 0.4), (0.4, 0.6), (0.6, 1.1)]
+    # thresholds = [(0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.1)]
+    thresholds = [(0, 0.3), (0.3, 0.5), (0.5, 0.7), (0.7, 1.1)]
+    art_sents_stem = list(map(get_stemming, art_sents))[:MAX_SENT_ART]
+    for abst in abs_sents:
+        indices = list(range(len(art_sents_stem)))
+        abst_stem = get_stemming(abst)
+        rouges_l = list(map(compute_rouge_l(reference=abst_stem, mode=mode),
+                            art_sents_stem))
+
+        # ext = max(indices, key=lambda i: rouges[i])
+        indices_sorted = sorted(
+            indices, key=lambda i: rouges_l[i], reverse=True)
+        label = []
+        for idx in indices_sorted:
+            s = rouges_l[idx] + 0.025
+            for i, (low, high) in enumerate(thresholds):
+                if (low < s < high) or (s - low < 1e-3) or (s - high < 1e-3):
+                    label.append(i)
+                    break
+
+        assert len(label) == len(indices_sorted)
+        extracted.append(", ".join(map(str, indices_sorted)))
+        scores_l.append(", ".join(["%.4f" % rouges_l[idx]
+                                   for idx in indices_sorted]))
+        labels_l.append(", ".join(map(str, label)))
+
+    scores = (scores_l, labels_l)
+    return extracted, scores
+
+
 @curry
 def process(split, i):
     data_dir = join(DATA_DIR, split)
@@ -154,17 +195,18 @@ def process(split, i):
         # extracted, scores = get_extract_label(art_sents, abs_sents)
         # extracted, scores = get_multi_extract(art_sents, abs_sents)
         # scores_n1, scores_n2, scores_l, scores_w = scores
-        extracted, scores = get_max_rouge_l(art_sents, abs_sents)
-        scores_l, score_l_max = scores
+        extracted, scores = get_rerank(art_sents, abs_sents)
+        scores_l, labels_l = scores
     else:
         extracted, scores = [], []
         # scores_n1, scores_n2 = [], []
         # scores_l, scores_w = [], []
-        scores_l, score_l_max = [], []
+        scores_l, labels_l = [], []
     data['extracted'] = extracted
     # data['rouge_w_r'] = scores_w
     data['rouge_l_r'] = scores_l
-    data['rouge_l_r_max'] = score_l_max
+    data['label_l_r'] = labels_l
+    # data['rouge_l_r_max'] = score_l_max
     # data['rouge_n1_r'] = scores_n1
     # data['rouge_n2_r'] = scores_n2
     with open(join(data_dir, '{}.json'.format(i)), 'w') as f:
@@ -210,18 +252,19 @@ def label(split):
             # extracted, scores = get_extract_label(art_sents, abs_sents)
             # extracted, scores = get_multi_extract(art_sents, abs_sents)
             # scores_n1, scores_n2, scores_l, scores_w = scores
-            extracted, scores = get_max_rouge_l(art_sents, abs_sents)
-            scores_l, score_l_max = scores
+            extracted, scores = get_rerank(art_sents, abs_sents)
+            scores_l, labels_l = scores
         else:
             extracted, scores = [], []
             # scores_n1, scores_n2 = [], []
             # scores_l, scores_w = [], []
-            scores_l, score_l_max = [], []
+            scores_l, labels_l = [], []
 
         data['extracted'] = extracted
         # data['rouge_w_r'] = scores_w
         data['rouge_l_r'] = scores_l
-        data['rouge_l_r_max'] = score_l_max
+        data['label_l_r'] = labels_l
+        # data['rouge_l_r_max'] = score_l_max
         # data['rouge_n1_r'] = scores_n1
         # data['rouge_n2_r'] = scores_n2
 
@@ -233,8 +276,8 @@ def label(split):
 
 
 def main():
-    split_all = ['val', 'train']
-    # split_all = ['val']
+    # split_all = ['val', 'train']
+    split_all = ['val']
     for split in split_all:  # no need of extraction label when testing
         # label(split)
         label_mp(split)

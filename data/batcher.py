@@ -45,6 +45,28 @@ def coll_fn_multi_ext(data):
     return batch
 
 
+def coll_fn_rerank_ext(data):
+    def is_good_data(d):
+        """ make sure data is not empty"""
+        source_sents, extracts, labels = d
+        return source_sents and extracts and labels
+    batch = list(filter(is_good_data, data))
+    assert all(map(is_good_data, batch))
+    return batch
+
+
+def coll_fn_multi_abs(data):
+    def is_good_data(d):
+        source_sents, target_sents, extracts = d
+        return source_sents and target_sents and extracts
+        # NOTE: independent filtering works because
+        #       source and targets are matched properly by the Dataset
+
+    batch = list(filter(is_good_data, data))
+    assert all(map(is_good_data, batch))
+    return batch
+
+
 @curry
 def tokenize(max_len, texts):
     return [t.lower().split()[:max_len] for t in texts]
@@ -58,8 +80,8 @@ def conver2id(unk, word2id, words_list):
 @curry
 def prepro_fn(max_src_len, max_tgt_len, batch):
     sources, targets = batch
-    sources = tokenize(max_src_len, sources)
-    targets = tokenize(max_tgt_len, targets)
+    # sources = tokenize(max_src_len, sources)
+    # targets = tokenize(max_tgt_len, targets)
     batch = list(zip(sources, targets))
     return batch
 
@@ -77,6 +99,30 @@ def prepro_fn_extract(max_src_len, max_src_num, batch):
 
 
 @curry
+def prepro_fn_multi_abs(max_src_len, max_tgt_len, max_tgt_num, batch):
+    def prepro_one(sample):
+        source_sents, target_sents, extracts = sample
+        multi_ext = list(
+            map(lambda x: list(map(int, x.split(", "))), extracts))[:max_tgt_num]
+        matched_sents = []
+        for one_ext in multi_ext:
+            one_ext = sorted(one_ext)
+            one_arts = [source_sents[i] for i in one_ext]
+            one_arts = tokenize(max_src_len, one_arts)
+
+            if len(one_arts) == 1:
+                matched_sents.append(one_arts[0])
+            else:
+                matched_sents.append(list(concat(one_arts)))
+
+        target_sents = tokenize(max_tgt_len, target_sents)
+        return matched_sents, target_sents
+
+    batch = list(map(prepro_one, batch))
+    return batch
+
+
+@curry
 def prepro_fn_multi_ext(max_src_len, max_src_num, max_tgt_num, batch):
     def prepro_one(sample):
         source_sents, extracts = sample
@@ -89,6 +135,24 @@ def prepro_fn_multi_ext(max_src_len, max_src_num, max_tgt_num, batch):
         #     ele_filter = list(filter(lambda e: e < len(tokenized_sents), ele))
         #     cleaned_extracts.append(ele_filter)
         return tokenized_sents, cleaned_extracts
+    batch = list(map(prepro_one, batch))
+    return batch
+
+
+@curry
+def prepro_fn_rerank_ext(max_src_len, max_src_num, max_tgt_num, batch):
+    def prepro_one(sample):
+        source_sents, extracts, labels = sample
+        tokenized_sents = tokenize(max_src_len, source_sents)[:max_src_num]
+        rerank_ext = list(
+            map(lambda x: list(map(int, x.split(", "))), extracts))[:max_tgt_num]
+        rerank_label = list(
+            map(lambda x: list(map(int, x.split(", "))), labels))[:max_tgt_num]
+        # already done in make_extraction_label.py
+        cleaned_extracts = rerank_ext
+        cleaned_labels = rerank_label
+
+        return tokenized_sents, cleaned_extracts, cleaned_labels
     batch = list(map(prepro_one, batch))
     return batch
 
@@ -155,6 +219,23 @@ def convert_batch_multi_ext(unk, word2id, batch):
             binary_multi_ext.append(binary_extracts)
 
         return id_sents, multi_ext, binary_multi_ext
+    batch = list(map(convert_one, batch))
+    return batch
+
+
+@curry
+def convert_batch_rerank_ext(unk, word2id, batch):
+    def convert_one(sample):
+        source_sents, rerank_ext, rerank_label = sample
+        id_sents = conver2id(unk, word2id, source_sents)
+        label_reorder = []
+        for ext, label in zip(rerank_ext, rerank_label):
+            temp = [0] * len(ext)
+            for ext_i, label_i in zip(ext, label):
+                temp[ext_i] = label_i
+
+            label_reorder.append(temp)
+        return id_sents, label_reorder
     batch = list(map(convert_one, batch))
     return batch
 
@@ -277,6 +358,38 @@ def batchify_fn_multi_ext(pad, data, cuda=True):
 
     fw_args = (sources, target_lists, src_nums, tgt_nums)
     loss_args = (targets, targets_stop)
+    return fw_args, loss_args
+
+
+@curry
+def batchify_fn_rerank_ext(pad, data, cuda=True):
+    source_lists, target_lists = tuple(
+        map(list, unzip(data)))
+
+    src_nums = list(map(len, source_lists))
+    sources = list(map(pad_batch_tensorize(pad=pad, cuda=cuda), source_lists))
+
+    float_type = torch.cuda.FloatTensor if cuda else torch.FloatTensor
+    long_type = torch.cuda.LongTensor if cuda else torch.LongTensor
+
+    tgt_nums = list(map(len, target_lists))
+
+    targets = []
+    targets_stop = []
+    for tgt in target_lists:
+        binary_stop = [0] * (len(tgt) + 1)
+        binary_stop[-1] = 1
+
+        tgt_tensor = long_type(tgt)
+        targets.append(tgt_tensor)
+
+        binary_stop = float_type(binary_stop)
+        targets_stop.append(binary_stop)
+
+    fw_args = (sources, target_lists, src_nums, tgt_nums)
+    loss_args = (targets, targets_stop)
+    # import pdb
+    # pdb.set_trace()
     return fw_args, loss_args
 
 

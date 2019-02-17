@@ -32,6 +32,21 @@ function train_multi_extractor_ml() {
 
 }
 
+# path: [path/to/abstractor/model]
+# w2v: [path/to/word2vec/word2vec.128d.226k.bin]
+function train_rerank_extractor_ml() {
+    path=$1
+    w2v=$2
+    net_type=$3
+    gpu_idx=$4
+    echo "train_rerank_extractor_ml"
+    CUDA_VISIBLE_DEVICES=${gpu_idx} nohup python train_rerank_extractor_ml.py \
+            --path=${path} \
+            --w2v=${w2v} \
+            --net_type=${net_type} \
+            > "logs/train_rerank_extractor_ml_${net_type}.log" &
+}
+
 
 # path: [path/to/abstractor/model]
 # w2v: [path/to/word2vec/word2vec.128d.226k.bin]
@@ -44,6 +59,19 @@ function train_abstractor() {
             --path=${path} \
             --w2v=${w2v} \
             > "logs/train_abstractor.log" &
+}
+
+# path: [path/to/abstractor/model]
+# w2v: [path/to/word2vec/word2vec.128d.226k.bin]
+function train_multi_abstractor() {
+    path=$1
+    w2v=$2
+    gpu_idx=$3
+    echo "train_multi_abstractor"
+    CUDA_VISIBLE_DEVICES=${gpu_idx} nohup python train_multi_abstractor.py \
+            --path=${path} \
+            --w2v=${w2v} \
+            > "logs/train_multi_abstractor.log" &
 }
 
 
@@ -74,9 +102,16 @@ elif [[ ${order} == "multi_ext" ]]; then
     w2v_g=$4
     net_type_g=$5
     train_multi_extractor_ml ${path_g}  ${w2v_g} ${net_type_g}  ${gpu_idx_g}
+elif [[ ${order} == "rerank_ext" ]]; then
+    w2v_g=$4
+    net_type_g=$5
+    train_rerank_extractor_ml ${path_g}  ${w2v_g} ${net_type_g}  ${gpu_idx_g}
 elif [[ ${order} == "abs" ]]; then
     w2v_g=$4
     train_abstractor ${path_g}  ${w2v_g}  ${gpu_idx_g}
+elif [[ ${order} == "multi_abs" ]]; then
+    w2v_g=$4
+    train_multi_abstractor ${path_g}  ${w2v_g}  ${gpu_idx_g}
 elif [[ ${order} == "full" ]]; then
     abs_dir_g=$4
     ext_dir_g=$5

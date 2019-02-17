@@ -1,11 +1,11 @@
-""" train extractor (ML)"""
+""" train the abstractor"""
 import argparse
 import json
 import os
 from os.path import join, exists
 import pickle as pkl
 
-from cytoolz import compose
+from cytoolz import curry, concat, compose
 
 import torch
 from torch import optim
@@ -13,21 +13,21 @@ from torch.nn import functional as F
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 
-# from model.extract import ExtractSumm, PtrExtractSumm
-from model.multi_extract import MultiExtractSumm
-from model.util import sequence_loss, multi_loss
+from model.copy_summ import CopySumm
+from model.util import sequence_loss
 from training import get_basic_grad_fn, basic_validate
 from training import BasicPipeline, BasicTrainer
 
-from utils import PAD, UNK, MAX_SENT_ART, MAX_SENT_ABS, MAX_WORD_ART, MAX_WORD_ABS
-from utils import make_vocab, make_embedding
-
 from data.data import CnnDmDataset
-from data.batcher import coll_fn_multi_ext, prepro_fn_multi_ext
-from data.batcher import convert_batch_multi_ext, batchify_fn_multi_ext
+from data.batcher import coll_fn, prepro_fn, tokenize
+from data.batcher import convert_batch_copy, batchify_fn_copy
 from data.batcher import BucketedGenerater
 
+from utils import PAD, UNK, START, END, MAX_SENT_ART, MAX_SENT_ABS, MAX_WORD_ART, MAX_WORD_ABS
+from utils import make_vocab, make_embedding
 
+# NOTE: bucket size too large may sacrifice randomness,
+#       to low may increase # of PAD tokens
 BUCKET_SIZE = 6400
 
 # try:
@@ -38,80 +38,58 @@ BUCKET_SIZE = 6400
 DATA_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/multi_ext'
 
 
-class MultiExtractDataset(CnnDmDataset):
-    """ article sentences -> extraction indices
+class MultiMatchDataset(CnnDmDataset):
+    """ single article sentence -> single abstract sentence
     (dataset created by greedily matching ROUGE)
     """
 
     def __init__(self, split):
         super().__init__(split, DATA_DIR)
+        self._max_src_len = MAX_WORD_ART
+        self._max_tgt_len = MAX_WORD_ABS
+        self._max_tgt_num = MAX_SENT_ABS
 
     def __getitem__(self, i):
         js_data = super().__getitem__(i)
-        art_sents, extracts = js_data['article'], js_data['extracted']
-        return art_sents, extracts
+        art_sents, abs_sents, extracts = (
+            js_data['article'], js_data['abstract'], js_data['extracted'])
+
+        extracts = extracts[:self._max_tgt_num]
+        multi_ext = list(
+            map(lambda x: list(map(int, x.split(", "))), extracts))
+        abs_sents = abs_sents[:len(multi_ext)]
+        matched_sents = []
+        for one_ext in multi_ext:
+            one_ext = sorted(one_ext)
+            one_arts = [art_sents[i] for i in one_ext]
+            one_arts = tokenize(self._max_src_len, one_arts)
+
+            if len(one_arts) == 1:
+                matched_sents.append(one_arts[0])
+            else:
+                matched_sents.append(list(concat(one_arts)))
+
+        abs_sents = tokenize(self._max_tgt_len, abs_sents)
+
+        return matched_sents, abs_sents
 
 
-def build_batchers(net_type, word2id, cuda, debug):
-    assert net_type in ['multi']
-    prepro = prepro_fn_multi_ext(
-        args.max_word, args.max_sent_art, args.max_sent_abs)
-
-    def sort_key(sample):
-        src_sents, _ = sample
-        return len(src_sents)
-    # batchify_fn = (batchify_fn_extract_ff if net_type == 'ff'
-    #                else batchify_fn_extract_ptr)
-    # convert_batch = (convert_batch_extract_ff if net_type == 'ff'
-    #                  else convert_batch_extract_ptr)
-
-    batchify_fn = batchify_fn_multi_ext
-    convert_batch = convert_batch_multi_ext
-    batchify = compose(batchify_fn(PAD, cuda=cuda),
-                       convert_batch(UNK, word2id))
-
-    train_loader = DataLoader(
-        MultiExtractDataset('train'), batch_size=BUCKET_SIZE,
-        shuffle=not debug,
-        num_workers=4 if cuda and not debug else 0,
-        collate_fn=coll_fn_multi_ext
-    )
-    train_batcher = BucketedGenerater(train_loader, prepro, sort_key, batchify,
-                                      single_run=False, fork=not debug)
-
-    val_loader = DataLoader(
-        MultiExtractDataset('val'), batch_size=BUCKET_SIZE,
-        shuffle=False, num_workers=4 if cuda and not debug else 0,
-        collate_fn=coll_fn_multi_ext
-    )
-    val_batcher = BucketedGenerater(val_loader, prepro, sort_key, batchify,
-                                    single_run=True, fork=not debug)
-    return train_batcher, val_batcher
-
-
-def configure_net(net_type, vocab_size, emb_dim, conv_hidden,
-                  lstm_hidden, lstm_layer, bidirectional):
-    # assert net_type in ['ff', 'rnn']
-    assert net_type in ['multi']
+def configure_net(vocab_size, emb_dim,
+                  n_hidden, bidirectional, n_layer):
     net_args = {}
     net_args['vocab_size'] = vocab_size
     net_args['emb_dim'] = emb_dim
-    net_args['conv_hidden'] = conv_hidden
-    net_args['lstm_hidden'] = lstm_hidden
-    net_args['lstm_layer'] = lstm_layer
+    net_args['n_hidden'] = n_hidden
     net_args['bidirectional'] = bidirectional
+    net_args['n_layer'] = n_layer
 
-    # net = (ExtractSumm(**net_args) if net_type == 'ff'
-    #        else PtrExtractSumm(**net_args))
-    net = MultiExtractSumm(**net_args)
+    net = CopySumm(**net_args)
     return net, net_args
 
 
-def configure_training(net_type, opt, lr, clip_grad, lr_decay, batch_size):
+def configure_training(opt, lr, clip_grad, lr_decay, batch_size):
     """ supports Adam optimizer only"""
     assert opt in ['adam']
-    # assert net_type in ['ff', 'rnn']
-    assert net_type in ['multi']
     opt_kwargs = {}
     opt_kwargs['lr'] = lr
 
@@ -121,40 +99,56 @@ def configure_training(net_type, opt, lr, clip_grad, lr_decay, batch_size):
     train_params['batch_size'] = batch_size
     train_params['lr_decay'] = lr_decay
 
-    if net_type == 'ff':
-        def criterion(logit, target): return F.binary_cross_entropy_with_logits(
-            logit, target, reduction='none')
-    elif net_type == 'multi':
-        def bce(logit, target): return F.binary_cross_entropy_with_logits(
-            logit, target, reduction='none')
+    def nll(logit, target): return F.nll_loss(logit, target, reduce=False)
 
-        def criterion(logits, logits_stop, targets, targets_stop):
-            return multi_loss(logits, logits_stop, targets, targets_stop, xent_fn=bce, xent_fn_stop=bce)
-    else:
-        def ce(logit, target): return F.cross_entropy(
-            logit, target, reduction='none')
-
-        def criterion(logits, targets):
-            return sequence_loss(logits, targets, ce, pad_idx=-1)
+    def criterion(logits, targets):
+        return sequence_loss(logits, targets, nll, pad_idx=PAD)
 
     return criterion, train_params
 
 
+def build_batchers(word2id, cuda, debug):
+    prepro = prepro_fn(args.max_art, args.max_abs)
+
+    def sort_key(sample):
+        src, target = sample
+        return (len(target), len(src))
+    batchify = compose(
+        batchify_fn_copy(PAD, START, END, cuda=cuda),
+        convert_batch_copy(UNK, word2id)
+    )
+
+    train_loader = DataLoader(
+        MultiMatchDataset('train'), batch_size=BUCKET_SIZE,
+        shuffle=not debug,
+        num_workers=4 if cuda and not debug else 0,
+        collate_fn=coll_fn
+    )
+    train_batcher = BucketedGenerater(train_loader, prepro, sort_key, batchify,
+                                      single_run=False, fork=not debug)
+
+    val_loader = DataLoader(
+        MultiMatchDataset('val'), batch_size=BUCKET_SIZE,
+        shuffle=False, num_workers=4 if cuda and not debug else 0,
+        collate_fn=coll_fn
+    )
+    val_batcher = BucketedGenerater(val_loader, prepro, sort_key, batchify,
+                                    single_run=True, fork=not debug)
+    return train_batcher, val_batcher
+
+
 def main(args):
-    # assert args.net_type in ['ff', 'rnn', 'multi']
-    assert args.net_type in ['multi']
     # create data batcher, vocabulary
     # batcher
     with open(join(DATA_DIR, 'vocab_cnt.pkl'), 'rb') as f:
         wc = pkl.load(f)
     word2id = make_vocab(wc, args.vsize)
-    train_batcher, val_batcher = build_batchers(args.net_type, word2id,
+    train_batcher, val_batcher = build_batchers(word2id,
                                                 args.cuda, args.debug)
 
     # make net
-    net, net_args = configure_net(args.net_type,
-                                  len(word2id), args.emb_dim, args.conv_hidden,
-                                  args.lstm_hidden, args.lstm_layer, args.bi)
+    net, net_args = configure_net(len(word2id), args.emb_dim,
+                                  args.n_hidden, args.bi, args.n_layer)
     if args.w2v:
         # NOTE: the pretrained embedding having the same dimension
         #       as args.emb_dim should already be trained
@@ -164,7 +158,7 @@ def main(args):
 
     # configure training setting
     criterion, train_params = configure_training(
-        args.net_type, 'adam', args.lr, args.clip, args.decay, args.batch
+        'adam', args.lr, args.clip, args.decay, args.batch
     )
 
     # save experiment setting
@@ -173,7 +167,7 @@ def main(args):
     with open(join(args.path, 'vocab.pkl'), 'wb') as f:
         pkl.dump(word2id, f, pkl.HIGHEST_PROTOCOL)
     meta = {}
-    meta['net'] = 'ml_{}_extractor'.format(args.net_type)
+    meta['net'] = 'multi_abstractor'
     meta['net_args'] = net_args
     meta['traing_params'] = train_params
     with open(join(args.path, 'meta.json'), 'w') as f:
@@ -202,37 +196,32 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description='training of the feed-forward extractor (ff-ext, ML)'
+        description='training of the abstractor (ML)'
     )
     parser.add_argument('--path', required=True, help='root of the model')
 
-    # model options
-    parser.add_argument('--net_type', action='store', default='multi',
-                        help='model type of the extractor (multi)')
     parser.add_argument('--vsize', type=int, action='store', default=30000,
                         help='vocabulary size')
     parser.add_argument('--emb_dim', type=int, action='store', default=128,
                         help='the dimension of word embedding')
-    # parser.add_argument('--emb_dim_idx', type=int, action='store', default=128,
-    #                     help='the dimension of extracted idx embedding')
     parser.add_argument('--w2v', action='store',
                         help='use pretrained word2vec embedding')
-    parser.add_argument('--conv_hidden', type=int, action='store', default=100,
-                        help='the number of hidden units of Conv')
-    parser.add_argument('--lstm_hidden', type=int, action='store', default=256,
-                        help='the number of hidden units of lSTM')
-    parser.add_argument('--lstm_layer', type=int, action='store', default=1,
-                        help='the number of layers of LSTM Encoder')
+    parser.add_argument('--n_hidden', type=int, action='store', default=256,
+                        help='the number of hidden units of LSTM')
+    parser.add_argument('--n_layer', type=int, action='store', default=1,
+                        help='the number of layers of LSTM')
     parser.add_argument('--no-bi', action='store_true',
                         help='disable bidirectional LSTM encoder')
 
     # length limit
-    parser.add_argument('--max_word', type=int, action='store', default=MAX_WORD_ART,
-                        help='maximun words in a single article sentence')
     parser.add_argument('--max_sent_art', type=int, action='store', default=MAX_SENT_ART,
                         help='maximun sentences in an article article')
     parser.add_argument('--max_sent_abs', type=int, action='store', default=MAX_SENT_ABS,
                         help='maximun sentences in an article article')
+    parser.add_argument('--max_art', type=int, action='store', default=MAX_WORD_ART,
+                        help='maximun words in a single article sentence')
+    parser.add_argument('--max_abs', type=int, action='store', default=MAX_WORD_ABS,
+                        help='maximun words in a single abstract sentence')
     # training options
     parser.add_argument('--lr', type=float, action='store', default=1e-3,
                         help='learning rate')

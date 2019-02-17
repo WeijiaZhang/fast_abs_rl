@@ -6,47 +6,72 @@ from torch import nn
 from torch.nn import init
 from torch.nn import functional as F
 
+from .extract import INI
 from .extract import ConvSentEncoder, LSTMEncoder, LSTMPointerNet
 from .rnn import MultiLayerLSTMCells
+from .util import len_mask
+from .attention import prob_normalize
 
 
-class MultiStepDecoder(LSTMPointerNet):
+class RerankExtractor(LSTMPointerNet):
     """Revised Pointer network as in Vinyals et al """
 
-    def __init__(self, input_dim, n_hidden, n_layer,
+    def __init__(self, input_dim, n_classes, emb_dim_cls, n_hidden, n_layer,
                  dropout, n_hop):
         super().__init__(input_dim, n_hidden, n_layer, dropout, n_hop)
+
+        self._n_classes = n_classes
+        self._embedding_cls = nn.Embedding(
+            n_classes + 1, emb_dim_cls, padding_idx=n_classes)
+        self._rerank_v = nn.Parameter(torch.Tensor(n_hidden, n_classes))
         self._stop_linear = nn.Linear(n_hidden, 1)
+
+        # self._cls_wm = nn.Parameter(torch.Tensor(emb_dim_cls, n_hidden))
+        self._cls_wq = nn.Parameter(torch.Tensor(input_dim, emb_dim_cls))
+        self._cls_v = nn.Parameter(torch.Tensor(emb_dim_cls))
+
+        init.xavier_normal_(self._rerank_v)
+        init.xavier_normal_(self._embedding_cls.weight)
+
+        # init.xavier_normal_(self._cls_wm)
+        init.xavier_normal_(self._cls_wq)
+        init.uniform_(self._cls_v, -INI, INI)
         # convolution for ptr
         # self._conv_ptr = nn.Conv1d(
         #     input_dim, input_dim, kernel_size=3, padding=1)
 
-    def forward(self, attn_mem_pad, tar_in, mem_sizes):
+    def forward(self, attn_mem, tar_in, mem_sizes_src, mem_sizes_tgt):
         """atten_mem: Tensor of size [batch_size, max_sent_num, input_dim]"""
-        attn_mem, lstm_in = self._get_lstm_in(attn_mem_pad, tar_in)
         attn_feat, hop_feat, lstm_states, init_i = self._prepare(attn_mem)
+        lstm_in = self._get_lstm_in(
+            attn_mem, tar_in, mem_sizes_src, mem_sizes_tgt, self._n_classes)
+
         lstm_in = torch.cat([init_i, lstm_in], dim=1).transpose(0, 1)
         query, final_states = self._lstm(lstm_in, lstm_states)
         query = query.transpose(0, 1)
 
         for _ in range(self._n_hop):
             query = LSTMPointerNet.attention(
-                hop_feat, query, self._hop_v, self._hop_wq, mem_sizes)
+                hop_feat, query, self._hop_v, self._hop_wq, mem_sizes_src)
 
         output_stop = self._stop_linear(query).squeeze(-1)
-        output = LSTMPointerNet.attention_score(
-            attn_feat, query, self._attn_v, self._attn_wq)
+        output = RerankExtractor.rerank_score(
+            attn_feat, query, self._rerank_v, self._attn_wq)
+
+        # import pdb
+        # pdb.set_trace()
 
         return output, output_stop  # unormalized extraction logit
 
     def extract(self, attn_mem, mem_sizes, max_dec_step, thre):
         """extract k sentences, decode only, batch_size==1"""
         attn_feat, hop_feat, lstm_states, lstm_in = self._prepare(attn_mem)
+        cls_feat = torch.matmul(attn_mem, self._cls_wq.unsqueeze(0))
         lstm_in = lstm_in.squeeze(1)
         if self._lstm_cell is None:
             self._lstm_cell = MultiLayerLSTMCells.convert(
                 self._lstm).to(attn_mem.device)
-        extracts = []
+        rerank_list = []
         for _ in range(max_dec_step):
             h, c = self._lstm_cell(lstm_in, lstm_states)
             query = h[-1]
@@ -57,29 +82,42 @@ class MultiStepDecoder(LSTMPointerNet):
             output_stop = torch.sigmoid(self._stop_linear(query)).item()
             if output_stop > thre:
                 break
-            output = LSTMPointerNet.attention_score(
-                attn_feat, query, self._attn_v, self._attn_wq)
-            score = torch.sigmoid(output.view(-1)).tolist()
+            output = RerankExtractor.rerank_score(
+                attn_feat, query, self._rerank_v, self._attn_wq)
+            score = F.softmax(output, dim=-1)
+            rerank_cls = score.max(dim=-1)[1]
+            rerank_cls_emb = self._embedding_cls(rerank_cls)
+            output_cls = RerankExtractor.class_score(
+                cls_feat, rerank_cls_emb, self._cls_v)
             # for e in extracts:
             #     score[e] = -1e6
-            ext = []
-            max_i, max_s = 0, 0
-            for i, s in enumerate(score):
-                if s > thre:
-                    ext.append(i)
-                if s > max_s:
-                    max_i, max_s = i, s
-            # if no extracted idx, adding idx of maximum scores
-            if len(ext) == 0:
-                ext.append(max_i)
-
-            extracts.append(ext)
             lstm_states = (h, c)
-            ext_idx = torch.LongTensor(ext)
-            lstm_in = attn_mem[:, ext_idx, :].mean(dim=1)
-        return extracts
+            score_cls = F.softmax(output_cls, dim=-1)
+            lstm_in = torch.matmul(score_cls, attn_mem).squeeze(1)
+            rerank_list.append(rerank_cls.view(-1).tolist())
+        return rerank_list
 
-    def _pad_target(self, inputs, pad, device):
+    @staticmethod
+    def rerank_score(attention, query, v, w):
+        """ unnormalized rerank score"""
+        sum_ = attention.unsqueeze(1) + torch.matmul(
+            query, w.unsqueeze(0)
+        ).unsqueeze(2)  # [B, Nq, Ns, D]
+        score = torch.matmul(
+            torch.tanh(sum_), v.unsqueeze(0).unsqueeze(1)
+        )  # [B, Nq, Ns, C]
+        return score
+
+    @staticmethod
+    def class_score(attention, class_emb, v):
+        """ unnormalized class score"""
+        sum_ = attention.unsqueeze(1) + class_emb   # [B, Nq, Ns, Dc]
+        score = torch.matmul(
+            torch.tanh(sum_), v.unsqueeze(0).unsqueeze(1).unsqueeze(3)
+        ).squeeze(3)  # [B, Nq, Ns]
+        return score
+
+    def _pad_target(self, inputs, max_src_num, max_tgt_num, device, num_pad):
         """pad_batch_multi_step
 
         :param inputs: List of size B containing list of size T (three-level lists)
@@ -87,53 +125,46 @@ class MultiStepDecoder(LSTMPointerNet):
         :rtype: TorchTensor of size (B, T, ...)
         """
         batch_size = len(inputs)
-        max_len = 0
-        max_len_one_step = 0
-        for ids in inputs:
-            max_len = max(len(ids), max_len)
-            max_len_one_step = max(max(map(len, ids)), max_len_one_step)
-
         # adding stop control
-        tensor_shape = (batch_size, max_len, max_len_one_step)
+        tensor_shape = (batch_size, max_tgt_num, max_src_num)
         res_tensor = torch.LongTensor(*tensor_shape).to(device)
-        res_tensor.fill_(pad)
+        res_tensor.fill_(num_pad)
         for i, ids in enumerate(inputs):
             for j, ele in enumerate(ids):
                 ele_tensor = torch.LongTensor(ele).to(device)
                 res_tensor[i, j, :len(ele)] = ele_tensor
         return res_tensor
 
-    def _get_lstm_in(self, enc_out_pad, tar_in):
+    def _get_lstm_in(self, attn_mem, tar_in, mem_sizes_src, mem_sizes_tgt, num_pad):
         """multi extract k sentences"""
-        num_pad = enc_out_pad.size(1) - 1
-        tar_in_pad = self._pad_target(tar_in, num_pad, enc_out_pad.device)
-        bs, nt, nt_e = tar_in_pad.size()
-        d = enc_out_pad.size(2)
-        ptr_in = []
-        for i in range(nt):
-            target = tar_in_pad[:, i, :]
-            seq_lens = list(
-                map(lambda x: len(x[i]) if i < len(x) else 0, tar_in))
-            ptr_one = torch.gather(
-                enc_out_pad, dim=1, index=target.unsqueeze(2).expand(bs, nt_e, d)
-            )
-            ptr_one_sum = ptr_one.sum(dim=1)
-            ptr_one_mean = torch.stack(
-                [s / l if l > 0 else s for s, l in zip(ptr_one_sum, seq_lens)], dim=0)
-            ptr_in.append(ptr_one_mean)
+        max_src_num = attn_mem.size(1)
+        max_tgt_num = max(mem_sizes_tgt)
+        tar_in_pad = self._pad_target(
+            tar_in, max_src_num, max_tgt_num, attn_mem.device, num_pad)
 
-        enc_out = enc_out_pad[:, :-1, :]
-        ptr_in = torch.stack(ptr_in, dim=1)
-        return enc_out, ptr_in
+        tar_in_emb = self._embedding_cls(tar_in_pad)
+        cls_feat = torch.matmul(attn_mem, self._cls_wq.unsqueeze(0))
+
+        score_cls = RerankExtractor.class_score(
+            cls_feat, tar_in_emb, self._cls_v)
+
+        mask = len_mask(mem_sizes_src, score_cls.device).unsqueeze(-2)
+        norm_score = prob_normalize(score_cls, mask)
+        output = torch.matmul(norm_score, attn_mem)
+        # import pdb
+        # pdb.set_trace()
+        return output
 
 
-class MultiExtractSumm(nn.Module):
+class RerankExtractSumm(nn.Module):
     """ multi-ext """
 
-    def __init__(self, emb_dim, vocab_size, conv_hidden,
+    def __init__(self, emb_dim, vocab_size, n_classes, emb_dim_cls, conv_hidden,
                  lstm_hidden, lstm_layer, bidirectional,
                  n_hop=1, dropout=0.0):
         super().__init__()
+        self._n_classes = n_classes
+        self.emb_dim_cls = emb_dim_cls
         self._sent_enc = ConvSentEncoder(
             vocab_size, emb_dim, conv_hidden, dropout)
         self._art_enc = LSTMEncoder(
@@ -141,22 +172,23 @@ class MultiExtractSumm(nn.Module):
             dropout=dropout, bidirectional=bidirectional
         )
         enc_out_dim = lstm_hidden * (2 if bidirectional else 1)
-        self._extractor = MultiStepDecoder(
-            enc_out_dim, lstm_hidden, lstm_layer,
+        self._extractor = RerankExtractor(
+            enc_out_dim, n_classes, emb_dim_cls, lstm_hidden, lstm_layer,
             dropout, n_hop
         )
 
     def forward(self, article_sents, tar_in, sent_nums_src, sent_nums_tgt):
-        num_pad = max(sent_nums_src)
-        enc_out_pad = self._encode(
-            article_sents, sent_nums_src, max_n=num_pad)
+        max_src_num = max(sent_nums_src)
+        enc_out = self._encode(
+            article_sents, sent_nums_src, max_n=max_src_num)
 
         output, output_stop = self._extractor(
-            enc_out_pad, tar_in, sent_nums_src)
+            enc_out, tar_in, sent_nums_src, sent_nums_tgt)
 
         out_no_pad, out_stop_no_pad = [], []
         for i, (n_src, n_tgt) in enumerate(zip(sent_nums_src, sent_nums_tgt)):
-            out_no_pad.append(output[i, :n_tgt, :n_src].contiguous().view(-1))
+            out_no_pad.append(
+                output[i, :n_tgt, :n_src].contiguous())
             out_stop_no_pad.append(
                 output_stop[i, :(n_tgt + 1)].contiguous().view(-1))
 
@@ -189,12 +221,12 @@ class MultiExtractSumm(nn.Module):
             )
 
         lstm_out = self._art_enc(enc_sent, sent_nums)
-        if sent_nums is None:
-            lstm_out_pad = lstm_out
-        else:
-            lstm_out_pad = torch.cat([lstm_out, torch.zeros(
-                lstm_out.size(0), 1, lstm_out.size(2)).to(lstm_out.device)], dim=1)
-        return lstm_out_pad
+        # if sent_nums is None:
+        #     lstm_out_pad = lstm_out
+        # else:
+        #     lstm_out_pad = torch.cat([lstm_out, torch.zeros(
+        #         lstm_out.size(0), 1, lstm_out.size(2)).to(lstm_out.device)], dim=1)
+        return lstm_out
 
     def set_embedding(self, embedding):
         self._sent_enc.set_embedding(embedding)

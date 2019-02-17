@@ -18,6 +18,7 @@ from make_extraction_labels import _split_words
 from metric import compute_rouge_l
 from evaluate import eval_rouge_by_cmd
 from decode_full_plus_analysis import format_rouge
+from decoding import AnalysisDataset
 
 
 def split_sentences(article, sentence_start_tag='<t>', sentence_end_tag='</t>'):
@@ -36,9 +37,9 @@ def count_data_by_suffix(path, suffix='json'):
     return n_data
 
 
-def read_json(fin, key='decode', k=3):
+def read_json(fin, key='decode'):
     js_data = json.loads(fin.read())
-    abs_sents = js_data[key][:k]
+    abs_sents = js_data[key]
     return abs_sents
 
 
@@ -112,6 +113,84 @@ def get_co_sent():
                               (query, len(co_idx), idx_str))
 
     output_file.close()
+
+
+def observe_len_diff(args):
+    dec_path = args.in_path
+    root_path = './output/stats'
+    ref_path = join(root_path, 'val_refs_sent_len.txt')
+    ref_sent_len, dec_sent_len = [], []
+    with open(ref_path) as f1, open(dec_path) as f2:
+        for line in f1.readlines():
+            ref_sent_len.append(int(line.strip()))
+
+        for line in f2.readlines():
+            dec_sent_len.append(int(line.strip()))
+
+    assert len(ref_sent_len) == len(dec_sent_len)
+    range_stats = defaultdict(int)
+    range_name = ['<-3', '-3', '-2', '-1', '0', '1', '2', '3', '>3']
+    for dec, ref in zip(dec_sent_len, ref_sent_len):
+        diff = dec - ref
+        if diff < -3:
+            range_stats['<-3'] += 1
+        elif -3 <= diff <= 3:
+            range_stats[str(diff)] += 1
+        else:
+            range_stats['>3'] += 1
+
+    for name in range_name:
+        print("%s: %d (%.2f%%)" % (name, range_stats[name],
+                                   100.0 * range_stats[name] / (len(ref_sent_len) + 1e-3)))
+
+
+def postprocess_decode_error(args):
+    dec_path = join(args.in_path, args.split)
+    save_path = join(args.out_path, args.split)
+    split = args.split
+    low, high = 11520, 11551
+    is_multi = True if args.multi else False
+    analysis_dataset = AnalysisDataset(split, is_multi=is_multi)
+    thre = 'multi' if is_multi else 'origin'
+
+    n_data = len(analysis_dataset)
+    start = time()
+    for i in range(low, high + 1):
+        with open(join(dec_path, '{}.json'.format(i))) as fin:
+            dec_data = json.loads(fin.read())
+
+        out_data = {}
+        js_data = analysis_dataset[i]
+        decoded_sents = dec_data['decode']
+        out_data['id'] = js_data['id']
+        out_data['article'] = js_data['article']
+        out_data['abstract'] = js_data['abstract']
+        out_data['decode'] = decoded_sents
+        if split == 'val':
+            out_data['extracted'] = js_data['extracted']
+        out_data['extract_preds'] = js_data['extracted']
+        # calculating rouge score
+        rouge_str = format_rouge(
+            [decoded_sents], [out_data['abstract']], split=split, threshold=thre)
+        out_data['rouge'] = rouge_str
+        out_data['is_top'] = dec_data['is_top']
+        if split == 'val':
+            if is_multi:
+                out_data['rouge_l_r'] = js_data['rouge_l_r']
+                out_data['rouge_l_r_max'] = js_data['rouge_l_r_max']
+            else:
+                out_data['score'] = js_data['score']
+        with open(join(save_path, '{}.json'.format(i)),
+                  'w') as f:
+                # f.write(('\n'.join(decoded_sents)))
+            json.dump(out_data, f, indent=4)
+        i += 1
+        print('{}/{} ({:.2f}%) decoded in {} seconds\r'.format(
+            i, n_data, i / n_data * 100,
+            timedelta(seconds=int(time() - start))
+        ), end='')
+        # import pdb
+        # pdb.set_trace()
 
 
 def count_article_stats(args):
@@ -480,11 +559,99 @@ def multi_sents_analysis(args):
           (n_total_sent, n_total_sent / (n_data + 1e-3)))
 
 
+def rerank_analysis(args):
+    input_path = join(args.in_path, args.split)
+    suffix = args.suffix
+
+    n_data = count_data_by_suffix(input_path, suffix=suffix)
+    score_count_dict = defaultdict(list)
+    # thresholds = [0.1 * i for i in range(1, 10)]
+    # thresholds = [(-0.1, 0.1), (0.1, 0.2), (0.2, 0.3), (0.3, 0.4), (0.4, 0.5), (0.5, 0.6),
+    #               (0.6, 0.7), (0.7, 0.8), (0.8, 0.9), (0.9, 1.1)]
+    # thresholds = [(-0.1, 0.2), (0.2, 0.3), (0.3, 0.4),
+    #               (0.4, 0.5), (0.5, 0.7), (0.7, 1.1)]
+    # thresholds = [(low, low + 0.05)
+    #               for low in np.arange(0, 0.95, 0.05)] + [(0.95, 1.1)]
+    # thresholds = [(-0.1, 0.2), (0.2, 0.25), (0.25, 0.3),
+    #               (0.3, 0.35), (0.35, 0.4), (0.4, 0.6), (0.6, 1.1)]
+    # thresholds = [(0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.1)]
+    thresholds = [(0, 0.3), (0.3, 0.5), (0.5, 0.7), (0.7, 1.1)]
+    for n_i in tqdm(range(n_data)):
+        with open(join(input_path, '{}.{}'.format(n_i, suffix))) as f:
+            data = json.loads(f.read())
+            # score = data['score']
+            score_dict = {
+                'extracted': data['extracted'],
+                'rouge_l_r': data['rouge_l_r'],
+                'label_l_r': data['label_l_r']
+            }
+
+            score_multi = []
+            count_one = [0] * (len(thresholds) + 1)
+            cal_name = 'rouge_l_r'
+            for ext_str, score_str in zip(score_dict['extracted'], score_dict[cal_name]):
+                ext_idx = list(map(int, ext_str.split(", ")))
+                if cal_name == 'rouge_l_r':
+                    score = list(map(float, score_str.split(", ")))
+                else:
+                    score = list(map(int, score_str.split(", ")))
+
+                score_resort = [0] * len(score)
+                for i, s in zip(ext_idx, score):
+                    score_resort[i] = s + 0.025
+
+                score_multi.append(score_resort)
+
+            if len(score_multi) == 0:
+                # print("idx: %d" % n_i)
+                continue
+
+            num_art = len(score_multi[0])
+            num_abs = len(score_multi)
+            count_one[0] = num_art * 1
+
+            for i in range(num_art):
+                arr = list(map(lambda x: x[i], score_multi))
+                val = max(arr)
+                # for val in arr:
+                for j, (low, high) in enumerate(thresholds):
+                    if cal_name == 'rouge_l_r':
+                        if (low < val < high) or (val - low < 1e-3) or (val - high < 1e-3):
+                            count_one[j + 1] += 1
+                            break
+                    else:
+                        if val == j:
+                            count_one[j + 1] += 1
+                            break
+
+            score_count_dict[cal_name].append(count_one)
+
+    num_sum = 1
+    for key, score_count in score_count_dict.items():
+        for i in range(len(thresholds) + 1):
+            data = list(map(lambda x: x[i], score_count))
+            num_count = sum(data)
+            if i == 0:
+                print("Total number of %s: %d (avg sent: %.2f)" %
+                      (key, num_count, 1.0 * num_count / (len(score_count) + 1e-3)))
+                num_sum = num_count
+            else:
+                rate_str = '(%.2f%%)' % (
+                    100.0 * num_count / (num_sum + 1e-3))
+                percent = np.percentile(data, [50, 60, 70, 80, 90])
+                percent_str = "Percentile: 50%%: %.2f, 60%%: %.2f, 70%%: %.2f, 80%%: %.2f, 90%%: %.2f" % tuple(
+                    percent)
+                print("Number of %s (%.2f-%.2f): %d %s" %
+                      (key, thresholds[i - 1][0], thresholds[i - 1][1], num_count, rate_str))
+                if key != 'extracted':
+                    print("%s: %s" % (key, percent_str))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-func', '--function', required=True,
                         help='function to be selected.')
-    parser.add_argument('-in', '--in_path', required=True,
+    parser.add_argument('-in', '--in_path', required=False, default='',
                         help='Path to input path.')
     parser.add_argument('-out', '--out_path', required=False, default='./output/data_analysis',
                         help='Path to output file.')
@@ -496,6 +663,10 @@ def main():
                         help='threshold for switch')
     parser.add_argument('-spl', '--split', required=False, type=str, default='test',
                         help='Test or Validation.')
+    parser.add_argument('-mul', '--multi', action='store_true',
+                        help='use multi dataset.')
+    parser.add_argument('-org', '--origin', action='store_true',
+                        help='use origin dataset.')
     args = parser.parse_args()
 
     function = args.function
@@ -513,6 +684,12 @@ def main():
         extract_span_analysis(args)
     elif function == 'multi_sents':
         multi_sents_analysis(args)
+    elif function == 'post_dec_err':
+        postprocess_decode_error(args)
+    elif function == 'rerank':
+        rerank_analysis(args)
+    elif function == 'len_diff':
+        observe_len_diff(args)
     else:
         print('Unkown function name, please input again!!!')
 
