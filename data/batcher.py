@@ -48,14 +48,26 @@ def coll_fn_multi_ext(data):
 def coll_fn_rerank_ext(data):
     def is_good_data(d):
         """ make sure data is not empty"""
-        source_sents, extracts, labels = d
-        return source_sents and extracts and labels
+        source_sents, extracts, scores = d
+        return source_sents and extracts and scores
     batch = list(filter(is_good_data, data))
     assert all(map(is_good_data, batch))
     return batch
 
 
 def coll_fn_multi_abs(data):
+    def is_good_data(d):
+        source_sents, target_sents, extracts = d
+        return source_sents and target_sents and extracts
+        # NOTE: independent filtering works because
+        #       source and targets are matched properly by the Dataset
+
+    batch = list(filter(is_good_data, data))
+    assert all(map(is_good_data, batch))
+    return batch
+
+
+def coll_fn_rerank_abs(data):
     def is_good_data(d):
         source_sents, target_sents, extracts = d
         return source_sents and target_sents and extracts
@@ -142,17 +154,17 @@ def prepro_fn_multi_ext(max_src_len, max_src_num, max_tgt_num, batch):
 @curry
 def prepro_fn_rerank_ext(max_src_len, max_src_num, max_tgt_num, batch):
     def prepro_one(sample):
-        source_sents, extracts, labels = sample
+        source_sents, extracts, scores = sample
         tokenized_sents = tokenize(max_src_len, source_sents)[:max_src_num]
-        rerank_ext = list(
+        rerank_exts = list(
             map(lambda x: list(map(int, x.split(", "))), extracts))[:max_tgt_num]
-        rerank_label = list(
-            map(lambda x: list(map(int, x.split(", "))), labels))[:max_tgt_num]
+        rerank_scores = list(
+            map(lambda x: list(map(float, x.split(", "))), scores))[:max_tgt_num]
         # already done in make_extraction_label.py
-        cleaned_extracts = rerank_ext
-        cleaned_labels = rerank_label
+        cleaned_extracts = rerank_exts
+        cleaned_scores = rerank_scores
 
-        return tokenized_sents, cleaned_extracts, cleaned_labels
+        return tokenized_sents, cleaned_extracts, cleaned_scores
     batch = list(map(prepro_one, batch))
     return batch
 
@@ -226,16 +238,9 @@ def convert_batch_multi_ext(unk, word2id, batch):
 @curry
 def convert_batch_rerank_ext(unk, word2id, batch):
     def convert_one(sample):
-        source_sents, rerank_ext, rerank_label = sample
+        source_sents, rerank_exts, rerank_scores = sample
         id_sents = conver2id(unk, word2id, source_sents)
-        label_reorder = []
-        for ext, label in zip(rerank_ext, rerank_label):
-            temp = [0] * len(ext)
-            for ext_i, label_i in zip(ext, label):
-                temp[ext_i] = label_i
-
-            label_reorder.append(temp)
-        return id_sents, label_reorder
+        return id_sents, rerank_exts, rerank_scores
     batch = list(map(convert_one, batch))
     return batch
 
@@ -363,15 +368,28 @@ def batchify_fn_multi_ext(pad, data, cuda=True):
 
 @curry
 def batchify_fn_rerank_ext(pad, data, cuda=True):
-    source_lists, target_lists = tuple(
+    source_lists, extract_lists, score_lists = tuple(
         map(list, unzip(data)))
 
     src_nums = list(map(len, source_lists))
     sources = list(map(pad_batch_tensorize(pad=pad, cuda=cuda), source_lists))
 
     float_type = torch.cuda.FloatTensor if cuda else torch.FloatTensor
-    long_type = torch.cuda.LongTensor if cuda else torch.LongTensor
+    # long_type = torch.cuda.LongTensor if cuda else torch.LongTensor
 
+    def convert_one(sample):
+        rerank_exts, rerank_scores = sample
+        score_reorder = []
+        for ext, score in zip(rerank_exts, rerank_scores):
+            temp = [0] * len(ext)
+            for ext_i, score_i in zip(ext, score):
+                temp[ext_i] = score_i
+
+            score_reorder.append(temp)
+        return score_reorder
+
+    target_lists = list(
+        map(convert_one, list(zip(extract_lists, score_lists))))
     tgt_nums = list(map(len, target_lists))
 
     targets = []
@@ -380,13 +398,13 @@ def batchify_fn_rerank_ext(pad, data, cuda=True):
         binary_stop = [0] * (len(tgt) + 1)
         binary_stop[-1] = 1
 
-        tgt_tensor = long_type(tgt)
+        tgt_tensor = float_type(tgt)
         targets.append(tgt_tensor)
 
         binary_stop = float_type(binary_stop)
         targets_stop.append(binary_stop)
 
-    fw_args = (sources, target_lists, src_nums, tgt_nums)
+    fw_args = (sources, extract_lists, score_lists, src_nums, tgt_nums)
     loss_args = (targets, targets_stop)
     # import pdb
     # pdb.set_trace()

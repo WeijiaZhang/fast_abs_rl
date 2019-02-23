@@ -141,6 +141,7 @@ def get_rerank(art_sents, abs_sents, mode='r'):
     """ greedily match summary sentences to article sentences"""
     extracted = []
     scores_l = []
+    scores_l_renorm = []
     labels_l = []
     # thresholds = [(0, 0.1), (0.1, 0.2), (0.2, 0.3), (0.3, 0.4), (0.4, 0.5), (0.5, 0.6),
     #               (0.6, 0.7), (0.7, 0.8), (0.8, 0.9), (0.9, 1.1)]
@@ -149,7 +150,26 @@ def get_rerank(art_sents, abs_sents, mode='r'):
     # thresholds = [(0, 0.2), (0.2, 0.25), (0.25, 0.3),
     #               (0.3, 0.35), (0.35, 0.4), (0.4, 0.6), (0.6, 1.1)]
     # thresholds = [(0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.1)]
-    thresholds = [(0, 0.3), (0.3, 0.5), (0.5, 0.7), (0.7, 1.1)]
+    # thresholds = [(0, 0.3), (0.3, 0.5), (0.5, 0.7), (0.7, 1.1)]
+    thresholds_max = [(-0.1, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.1)]
+    # thresholds_renorm = [
+    #     [(-0.1, 0.3), (0.3, 0.45), (0.45, 0.6), (0.6, 0.8), (0.8, 1.1)],
+    #     [(-0.1, 0.25), (0.25, 0.4), (0.4, 0.55), (0.55, 0.75), (0.75, 1.1)],
+    #     [(-0.1, 0.225), (0.225, 0.375), (0.375, 0.525),
+    #      (0.525, 0.725), (0.725, 1.1)],
+    #     [(-0.1, 0.2), (0.2, 0.35), (0.35, 0.5), (0.5, 0.7), (0.7, 1.1)]
+    # ]
+    thresholds_renorm = [
+        [(-0.1, 0.15), (0.15, 0.28), (0.28, 0.34), (0.34, 0.4),
+         (0.4, 0.48), (0.48, 0.6), (0.6, 0.8), (0.8, 1.1)],
+        [(-0.1, 0.15), (0.15, 0.24), (0.24, 0.3), (0.3, 0.36),
+         (0.36, 0.45), (0.45, 0.55), (0.55, 0.75), (0.75, 1.1)],
+        [(-0.1, 0.15), (0.15, 0.22), (0.22, 0.28), (0.28, 0.34),
+         (0.34, 0.42), (0.42, 0.525), (0.525, 0.725), (0.725, 1.1)],
+        [(-0.1, 0.15), (0.15, 0.2), (0.2, 0.26), (0.26, 0.32),
+         (0.32, 0.39), (0.39, 0.5), (0.5, 0.7), (0.7, 1.1)]
+    ]
+
     art_sents_stem = list(map(get_stemming, art_sents))[:MAX_SENT_ART]
     for abst in abs_sents:
         indices = list(range(len(art_sents_stem)))
@@ -160,21 +180,35 @@ def get_rerank(art_sents, abs_sents, mode='r'):
         # ext = max(indices, key=lambda i: rouges[i])
         indices_sorted = sorted(
             indices, key=lambda i: rouges_l[i], reverse=True)
+
+        rouges_l_sorted = [rouges_l[idx] for idx in indices_sorted]
+        r_max = rouges_l_sorted[0]
+        rouges_l_renorm = [1.0] + [r / (r_max + 1e-3)
+                                   for r in rouges_l_sorted[1:]]
+
+        thre_idx = None
+        for i, (low, high) in enumerate(thresholds_max):
+            if (low < r_max < high) or (r_max - high < 1e-3):
+                thre_idx = i
+                break
+
+        assert thre_idx is not None
+        thre_cur = thresholds_renorm[thre_idx]
         label = []
-        for idx in indices_sorted:
-            s = rouges_l[idx] + 0.025
-            for i, (low, high) in enumerate(thresholds):
-                if (low < s < high) or (s - low < 1e-3) or (s - high < 1e-3):
+        for r in rouges_l_renorm:
+            for i, (low, high) in enumerate(thre_cur):
+                if (low < r < high) or (r - high < 1e-3):
                     label.append(i)
                     break
 
         assert len(label) == len(indices_sorted)
         extracted.append(", ".join(map(str, indices_sorted)))
-        scores_l.append(", ".join(["%.4f" % rouges_l[idx]
-                                   for idx in indices_sorted]))
+        scores_l.append(", ".join(map(lambda x: "%.4f" % x, rouges_l_sorted)))
+        scores_l_renorm.append(
+            ", ".join(map(lambda x: "%.4f" % x, rouges_l_renorm)))
         labels_l.append(", ".join(map(str, label)))
 
-    scores = (scores_l, labels_l)
+    scores = (scores_l, scores_l_renorm, labels_l)
     return extracted, scores
 
 
@@ -196,16 +230,17 @@ def process(split, i):
         # extracted, scores = get_multi_extract(art_sents, abs_sents)
         # scores_n1, scores_n2, scores_l, scores_w = scores
         extracted, scores = get_rerank(art_sents, abs_sents)
-        scores_l, labels_l = scores
+        scores_l, scores_l_renorm, labels_l = scores
     else:
         extracted, scores = [], []
         # scores_n1, scores_n2 = [], []
         # scores_l, scores_w = [], []
-        scores_l, labels_l = [], []
+        scores_l, scores_l_renorm, labels_l = [], [], []
     data['extracted'] = extracted
+    data['label_l_r'] = labels_l
     # data['rouge_w_r'] = scores_w
     data['rouge_l_r'] = scores_l
-    data['label_l_r'] = labels_l
+    data['rouge_l_r_renorm'] = scores_l_renorm
     # data['rouge_l_r_max'] = score_l_max
     # data['rouge_n1_r'] = scores_n1
     # data['rouge_n2_r'] = scores_n2
@@ -253,17 +288,18 @@ def label(split):
             # extracted, scores = get_multi_extract(art_sents, abs_sents)
             # scores_n1, scores_n2, scores_l, scores_w = scores
             extracted, scores = get_rerank(art_sents, abs_sents)
-            scores_l, labels_l = scores
+            scores_l, scores_l_renorm, labels_l = scores
         else:
             extracted, scores = [], []
             # scores_n1, scores_n2 = [], []
             # scores_l, scores_w = [], []
-            scores_l, labels_l = [], []
+            scores_l, scores_l_renorm, labels_l = [], [], []
 
         data['extracted'] = extracted
+        data['label_l_r'] = labels_l
         # data['rouge_w_r'] = scores_w
         data['rouge_l_r'] = scores_l
-        data['label_l_r'] = labels_l
+        data['rouge_l_r_renorm'] = scores_l_renorm
         # data['rouge_l_r_max'] = score_l_max
         # data['rouge_n1_r'] = scores_n1
         # data['rouge_n2_r'] = scores_n2
@@ -276,8 +312,8 @@ def label(split):
 
 
 def main():
-    # split_all = ['val', 'train']
-    split_all = ['val']
+    split_all = ['val', 'train']
+    # split_all = ['val']
     for split in split_all:  # no need of extraction label when testing
         # label(split)
         label_mp(split)

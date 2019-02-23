@@ -6,8 +6,8 @@ SPLIT_ALL=("val")
 # THRE_ALL=("0.5" "0.6" "0.7" "0.8" "0.9")
 # THRE_ALL=("ext_pred" "ext_gt")
 # THRE_ALL=("ext" "ext_ff" "ext_rl")
-THRE_ALL=("multi_ext" "abs_only" "multi_abs_only")
-
+# THRE_ALL=("multi_ext" "abs_only" "multi_abs_only")
+THRE_ALL=("rerank_ext")
 
 function switch_rewrite() {
 	echo "switch_rewrite"

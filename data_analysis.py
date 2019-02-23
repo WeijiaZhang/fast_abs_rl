@@ -39,7 +39,11 @@ def count_data_by_suffix(path, suffix='json'):
 
 def read_json(fin, key='decode'):
     js_data = json.loads(fin.read())
-    abs_sents = js_data[key]
+    # abs_sents = js_data[key]
+    art_sents = js_data['article']
+    ext_preds = np.unique(list(
+        map(lambda x: int(x.split(", ")[0]), js_data['extract_preds'])))
+    abs_sents = [art_sents[idx] for idx in ext_preds]
     return abs_sents
 
 
@@ -574,8 +578,27 @@ def rerank_analysis(args):
     #               for low in np.arange(0, 0.95, 0.05)] + [(0.95, 1.1)]
     # thresholds = [(-0.1, 0.2), (0.2, 0.25), (0.25, 0.3),
     #               (0.3, 0.35), (0.35, 0.4), (0.4, 0.6), (0.6, 1.1)]
-    # thresholds = [(0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.1)]
-    thresholds = [(0, 0.3), (0.3, 0.5), (0.5, 0.7), (0.7, 1.1)]
+    # thresholds = [(-0.1, 0.2), (0.2, 0.4), (0.4, 0.5), (0.5, 0.7), (0.7, 1.1)]
+    # thresholds = [(0, 0.3), (0.3, 0.5), (0.5, 0.7), (0.7, 1.1)]
+
+    thresholds_max = [(-0.1, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.1)]
+    # thresholds_renorm = [
+    #     [(-0.1, 0.3), (0.3, 0.45), (0.45, 0.6), (0.6, 0.8), (0.8, 1.1)],
+    #     [(-0.1, 0.25), (0.25, 0.4), (0.4, 0.55), (0.55, 0.75), (0.75, 1.1)],
+    #     [(-0.1, 0.225), (0.225, 0.375), (0.375, 0.525),
+    #      (0.525, 0.725), (0.725, 1.1)],
+    #     [(-0.1, 0.2), (0.2, 0.35), (0.35, 0.5), (0.5, 0.7), (0.7, 1.1)]
+    # ]
+    thresholds_renorm = [
+        [(-0.1, 0.15), (0.15, 0.28), (0.28, 0.34), (0.34, 0.4),
+         (0.4, 0.48), (0.48, 0.6), (0.6, 0.8), (0.8, 1.1)],
+        [(-0.1, 0.15), (0.15, 0.24), (0.24, 0.3), (0.3, 0.36),
+         (0.36, 0.45), (0.45, 0.55), (0.55, 0.75), (0.75, 1.1)],
+        [(-0.1, 0.15), (0.15, 0.22), (0.22, 0.28), (0.28, 0.34),
+         (0.34, 0.42), (0.42, 0.525), (0.525, 0.725), (0.725, 1.1)],
+        [(-0.1, 0.15), (0.15, 0.2), (0.2, 0.26), (0.26, 0.32),
+         (0.32, 0.39), (0.39, 0.5), (0.5, 0.7), (0.7, 1.1)]
+    ]
     for n_i in tqdm(range(n_data)):
         with open(join(input_path, '{}.{}'.format(n_i, suffix))) as f:
             data = json.loads(f.read())
@@ -587,18 +610,27 @@ def rerank_analysis(args):
             }
 
             score_multi = []
-            count_one = [0] * (len(thresholds) + 1)
+            count_one = [0] * (len(thresholds_renorm[0]) + 1)
             cal_name = 'rouge_l_r'
+            thre_idxs = []
             for ext_str, score_str in zip(score_dict['extracted'], score_dict[cal_name]):
                 ext_idx = list(map(int, ext_str.split(", ")))
                 if cal_name == 'rouge_l_r':
                     score = list(map(float, score_str.split(", ")))
+                    s_max = score[0]
+                    for i, (low, high) in enumerate(thresholds_max):
+                        if (low < s_max < high) or (s_max - high < 1e-3):
+                            thre_idxs.append(i)
+                            break
+                    score = [1.0] + [s / (s_max + 1e-3) for s in score[1:]]
+                    # import pdb
+                    # pdb.set_trace()
                 else:
                     score = list(map(int, score_str.split(", ")))
 
                 score_resort = [0] * len(score)
                 for i, s in zip(ext_idx, score):
-                    score_resort[i] = s + 0.025
+                    score_resort[i] = s
 
                 score_multi.append(score_resort)
 
@@ -608,27 +640,29 @@ def rerank_analysis(args):
 
             num_art = len(score_multi[0])
             num_abs = len(score_multi)
-            count_one[0] = num_art * 1
+            count_one[0] = num_art * num_abs
+            assert len(thre_idxs) == num_abs
 
-            for i in range(num_art):
-                arr = list(map(lambda x: x[i], score_multi))
-                val = max(arr)
-                # for val in arr:
-                for j, (low, high) in enumerate(thresholds):
-                    if cal_name == 'rouge_l_r':
-                        if (low < val < high) or (val - low < 1e-3) or (val - high < 1e-3):
-                            count_one[j + 1] += 1
-                            break
-                    else:
-                        if val == j:
-                            count_one[j + 1] += 1
-                            break
+            for i, score_i in enumerate(score_multi):
+                thre_cur = thresholds_renorm[thre_idxs[i]]
+                # import pdb
+                # pdb.set_trace()
+                for val in score_i:
+                    for j, (low, high) in enumerate(thre_cur):
+                        if cal_name == 'rouge_l_r':
+                            if (low < val < high) or (val - high < 1e-3):
+                                count_one[j + 1] += 1
+                                break
+                        else:
+                            if val == j:
+                                count_one[j + 1] += 1
+                                break
 
             score_count_dict[cal_name].append(count_one)
 
     num_sum = 1
     for key, score_count in score_count_dict.items():
-        for i in range(len(thresholds) + 1):
+        for i in range(len(thresholds_renorm[0]) + 1):
             data = list(map(lambda x: x[i], score_count))
             num_count = sum(data)
             if i == 0:
@@ -641,8 +675,8 @@ def rerank_analysis(args):
                 percent = np.percentile(data, [50, 60, 70, 80, 90])
                 percent_str = "Percentile: 50%%: %.2f, 60%%: %.2f, 70%%: %.2f, 80%%: %.2f, 90%%: %.2f" % tuple(
                     percent)
-                print("Number of %s (%.2f-%.2f): %d %s" %
-                      (key, thresholds[i - 1][0], thresholds[i - 1][1], num_count, rate_str))
+                print("Number of %s (label: %d): %d %s" %
+                      (key, i, num_count, rate_str))
                 if key != 'extracted':
                     print("%s: %s" % (key, percent_str))
 

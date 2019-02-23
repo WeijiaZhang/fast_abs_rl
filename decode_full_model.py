@@ -84,9 +84,9 @@ def decode(save_path, model_dir, split, batch_size,
                     # in some rare cases rnn-ext does not extract at all
                     ext = list(range(5))[:len(raw_art_sents)]
                 else:
-                    ext = [i.item() for i in ext]
+                    ext = [ele.item() for ele in ext]
                 ext_inds += [(len(ext_arts), len(ext))]
-                ext_arts += [raw_art_sents[i] for i in ext]
+                ext_arts += [raw_art_sents[ele] for ele in ext]
             if beam_size > 1:
                 all_beams = abstractor(ext_arts, beam_size, diverse)
                 dec_outs = rerank_mp(all_beams, ext_inds)

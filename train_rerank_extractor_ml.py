@@ -19,7 +19,7 @@ from model.util import sequence_loss, multi_loss, rerank_loss
 from training import get_basic_grad_fn, basic_validate
 from training import BasicPipeline, BasicTrainer
 
-from utils import PAD, UNK, MAX_SENT_ART, MAX_SENT_ABS, MAX_WORD_ART, MAX_WORD_ABS, NUM_CLASSES_RERANK
+from utils import PAD, UNK, MAX_SENT_ART, MAX_SENT_ABS, MAX_WORD_ART, MAX_WORD_ABS
 from utils import make_vocab, make_embedding
 
 from data.data import CnnDmDataset
@@ -48,8 +48,8 @@ class RerankExtractDataset(CnnDmDataset):
 
     def __getitem__(self, i):
         js_data = super().__getitem__(i)
-        art_sents, extracts, labels = js_data['article'], js_data['extracted'], js_data['label_l_r']
-        return art_sents, extracts, labels
+        art_sents, extracts, scores = js_data['article'], js_data['extracted'], js_data['rouge_l_r_renorm']
+        return art_sents, extracts, scores
 
 
 def build_batchers(net_type, word2id, cuda, debug):
@@ -58,7 +58,7 @@ def build_batchers(net_type, word2id, cuda, debug):
         args.max_word, args.max_sent_art, args.max_sent_abs)
 
     def sort_key(sample):
-        src_sents, exts, labels = sample
+        src_sents, exts, scores = sample
         return len(src_sents) * len(exts)
     # batchify_fn = (batchify_fn_extract_ff if net_type == 'ff'
     #                else batchify_fn_extract_ptr)
@@ -89,15 +89,14 @@ def build_batchers(net_type, word2id, cuda, debug):
     return train_batcher, val_batcher
 
 
-def configure_net(net_type, vocab_size, emb_dim, n_classes, emb_dim_cls, conv_hidden,
+def configure_net(net_type, vocab_size, emb_dim, n_rank, conv_hidden,
                   lstm_hidden, lstm_layer, bidirectional):
     # assert net_type in ['ff', 'rnn']
     assert net_type in ['rerank']
     net_args = {}
     net_args['vocab_size'] = vocab_size
     net_args['emb_dim'] = emb_dim
-    net_args['n_classes'] = n_classes
-    net_args['emb_dim_cls'] = emb_dim_cls
+    net_args['n_rank'] = n_rank
     net_args['conv_hidden'] = conv_hidden
     net_args['lstm_hidden'] = lstm_hidden
     net_args['lstm_layer'] = lstm_layer
@@ -136,7 +135,7 @@ def configure_training(net_type, opt, lr, clip_grad, lr_decay, batch_size):
             return multi_loss(logits, logits_stop, targets, targets_stop, xent_fn=bce, xent_fn_stop=bce)
     elif net_type == 'rerank':
         def criterion(logits, logits_stop, targets, targets_stop):
-            return rerank_loss(logits, logits_stop, targets, targets_stop, xent_fn=ce, xent_fn_stop=bce)
+            return rerank_loss(logits, logits_stop, targets, targets_stop, xent_fn=bce, xent_fn_stop=bce)
     else:
         def criterion(logits, targets):
             return sequence_loss(logits, targets, ce, pad_idx=-1)
@@ -156,7 +155,7 @@ def main(args):
                                                 args.cuda, args.debug)
 
     # make net
-    net, net_args = configure_net(args.net_type, len(word2id), args.emb_dim, args.n_classes, args.emb_dim_cls,
+    net, net_args = configure_net(args.net_type, len(word2id), args.emb_dim, args.n_rank,
                                   args.conv_hidden, args.lstm_hidden, args.lstm_layer, args.bi)
     if args.w2v:
         # NOTE: the pretrained embedding having the same dimension
@@ -236,10 +235,8 @@ if __name__ == '__main__':
                         help='maximun sentences in an article article')
     parser.add_argument('--max_sent_abs', type=int, action='store', default=MAX_SENT_ABS,
                         help='maximun sentences in an article article')
-    parser.add_argument('--n_classes', type=int, action='store', default=NUM_CLASSES_RERANK,
-                        help='number of classes for rerank extraction')
-    parser.add_argument('--emb_dim_cls', type=int, action='store', default=128,
-                        help='the dimension of rerank class embedding')
+    parser.add_argument('--n_rank', type=int, action='store', default=5,
+                        help='the number of topk sentences used to rank')
     # training options
     parser.add_argument('--lr', type=float, action='store', default=1e-3,
                         help='learning rate')

@@ -65,7 +65,7 @@ def multi_step_loss(logits, targets, xent_fn=None):
     return loss_all
 
 
-def rerank_step_loss(logits, targets, xent_fn=None):
+def rerank_pair_loss(logits, targets, xent_fn=None):
     """ functional interface of RerankStepLoss
     logits: a list of tensors
     tatget: a list of tensors (with same shape with logits)
@@ -79,6 +79,33 @@ def rerank_step_loss(logits, targets, xent_fn=None):
                 loss_sum = xent_fn(lo_i, tgt_i)
             else:
                 loss_sum += xent_fn(lo_i, tgt_i)
+            # import pdb
+            # pdb.set_trace()
+
+        loss_mean = loss_sum.mean(dim=0, keepdim=True)
+        loss_list.append(loss_mean)
+
+    loss_all = torch.cat(loss_list, dim=0)
+    return loss_all
+
+
+def rerank_point_loss(logits, targets, xent_fn=None):
+    """ functional interface of RerankStepLoss
+    logits: a list of tensors
+    tatget: a list of tensors (with same shape with logits)
+    """
+    assert len(logits) == len(targets)
+    loss_list = []
+    for lo, tgt in zip(logits, targets):
+        loss_sum = None
+        for lo_i, tgt_i in zip(lo, tgt):
+            if loss_sum is None:
+                loss_sum = xent_fn(lo_i, tgt_i)
+            else:
+                loss_sum += xent_fn(lo_i, tgt_i)
+            # import pdb
+            # pdb.set_trace()
+
         loss_mean = loss_sum.mean(dim=0, keepdim=True)
         loss_list.append(loss_mean)
 
@@ -96,8 +123,9 @@ def multi_loss(logits, logits_stop, targets, targets_stop, xent_fn=None, xent_fn
 
 
 def rerank_loss(logits, logits_stop, targets, targets_stop, xent_fn=None, xent_fn_stop=None):
-    loss_step = rerank_step_loss(
+    loss_score = score_step_loss(
         logits, targets, xent_fn=xent_fn)
+    loss_rank =
     loss_stop = multi_step_loss(
         logits_stop, targets_stop, xent_fn=xent_fn_stop)
     loss_all = loss_step + loss_stop

@@ -26,7 +26,7 @@ from data.data import CnnDmDataset
 #     print('please use environment variable to specify data directories')
 DATASET_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/fast_abs_rl/finished_files'
 MULTI_DATASET_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/multi_ext'
-RERANK_DDATASET_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/rerank'
+RERANK_DATASET_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/rerank'
 
 
 class AnalysisDataset(CnnDmDataset):
@@ -37,7 +37,7 @@ class AnalysisDataset(CnnDmDataset):
         if dec_type == 'multi':
             data_dir = MULTI_DATASET_DIR
         elif dec_type == 'rerank':
-            data_dir = RERANK_DDATASET_DIR
+            data_dir = RERANK_DATASET_DIR
         else:
             data_dir = DATASET_DIR
         super().__init__(split, data_dir)
@@ -55,7 +55,7 @@ class DecodeDataset(CnnDmDataset):
         if dec_type == 'multi':
             data_dir = MULTI_DATASET_DIR
         elif dec_type == 'rerank':
-            data_dir = RERANK_DDATASET_DIR
+            data_dir = RERANK_DATASET_DIR
         else:
             data_dir = DATASET_DIR
         super().__init__(split, data_dir)
@@ -226,7 +226,7 @@ class MultiExtractor(object):
         return indices
 
 
-class RerankAllExtractor(object):
+class RerankExtractor(object):
     def __init__(self, ext_dir, max_dec_step=10, thre=0.5, cuda=True):
         ext_meta = json.load(open(join(ext_dir, 'meta.json')))
         ext_cls = RerankExtractSumm

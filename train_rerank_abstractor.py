@@ -35,10 +35,11 @@ BUCKET_SIZE = 6400
 # except KeyError:
 #     print('please use environment variable to specify data directories')
 # DATA_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/fast_abs_rl/finished_files'
-DATA_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/multi_ext'
+# DATA_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/multi_ext'
+DATA_DIR = '/home/zhangwj/code/nlp/summarization/dataset/raw/CNN_Daily/rerank'
 
 
-class MultiMatchDataset(CnnDmDataset):
+class RerankMatchDataset(CnnDmDataset):
     """ single article sentence -> single abstract sentence
     (dataset created by greedily matching ROUGE)
     """
@@ -51,15 +52,20 @@ class MultiMatchDataset(CnnDmDataset):
 
     def __getitem__(self, i):
         js_data = super().__getitem__(i)
-        art_sents, abs_sents, extracts = (
-            js_data['article'], js_data['abstract'], js_data['extracted'])
+        art_sents, abs_sents = js_data['article'], js_data['abstract']
+        extracts, labels = js_data['extracted'], js_data['label_l_r']
 
         extracts = extracts[:self._max_tgt_num]
-        multi_ext = list(
+        labels = labels[:self._max_tgt_num]
+
+        rerank_ext = list(
             map(lambda x: list(map(int, x.split(", "))), extracts))
-        abs_sents = abs_sents[:len(multi_ext)]
+        rerank_label = list(
+            map(lambda x: list(map(int, x.split(", "))), labels))
+
+        abs_sents = abs_sents[:len(rerank_ext)]
         matched_sents = []
-        for one_ext in multi_ext:
+        for one_ext in rerank_ext:
             one_ext = sorted(one_ext)
             one_arts = [art_sents[i] for i in one_ext]
             one_arts = tokenize(self._max_src_len, one_arts)
